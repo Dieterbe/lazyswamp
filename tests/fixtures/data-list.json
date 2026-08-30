@@ -1,0 +1,23 @@
+{
+  "modelId": "548ef99a-e2a4-4a12-930e-9c76e1810ea9",
+  "modelName": "hello-world",
+  "modelType": "command/shell",
+  "groups": [
+    {
+      "type": "resource",
+      "items": [
+        {
+          "id": "82a0761d-d04f-44e1-ae4a-a3c0d1a47174",
+          "name": "result",
+          "version": 2,
+          "contentType": "application/json",
+          "type": "resource",
+          "streaming": false,
+          "size": 157,
+          "createdAt": "2026-04-27T18:46:41.553Z"
+        }
+      ]
+    }
+  ],
+  "total": 1
+}

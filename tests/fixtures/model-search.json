@@ -1,0 +1,10 @@
+{
+  "query": "",
+  "results": [
+    {
+      "id": "548ef99a-e2a4-4a12-930e-9c76e1810ea9",
+      "name": "hello-world",
+      "type": "command/shell"
+    }
+  ]
+}
