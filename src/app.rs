@@ -19,7 +19,7 @@ use crate::{
     },
     swamp::{
         DataArtifact, DataContent, DataVersion, MethodSpec, ModelDetails, ModelSummary, RunEvent,
-        SwampClient, TypeDescription,
+        SwampClient, TypeDescription, WorkflowDefinition, WorkflowNode, WorkflowSummary,
     },
 };
 
@@ -27,12 +27,20 @@ type StartupOutcome = (
     crate::error::Result<String>,
     crate::error::Result<Vec<ModelSummary>>,
     crate::error::Result<Vec<DataArtifact>>,
+    crate::error::Result<Vec<WorkflowSummary>>,
 );
 type StartupTask = JoinHandle<StartupOutcome>;
 
 enum PreloadEvent {
     Model(String, crate::error::Result<ModelDetails>),
     Type(String, crate::error::Result<TypeDescription>),
+    Workflow(String, crate::error::Result<WorkflowDefinition>),
+}
+
+enum PreloadRequest {
+    Model(String),
+    Type(String),
+    Workflow(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,6 +48,7 @@ pub enum Tab {
     Overview,
     Methods,
     Data,
+    Workflows,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,6 +89,11 @@ pub struct App {
     pub models: Vec<ModelSummary>,
     pub filtered_models: Vec<usize>,
     pub model_index: usize,
+    pub workflows: Vec<WorkflowSummary>,
+    pub filtered_workflows: Vec<usize>,
+    pub workflow_index: usize,
+    pub workflow: Option<WorkflowDefinition>,
+    pub workflow_node_index: usize,
     pub detail: Option<ModelDetails>,
     pub type_description: Option<TypeDescription>,
     pub method_index: usize,
@@ -107,14 +121,17 @@ pub struct App {
     model_cache: HashMap<String, ModelDetails>,
     type_cache: HashMap<String, TypeDescription>,
     data_cache: HashMap<String, Vec<DataArtifact>>,
+    workflow_cache: HashMap<String, WorkflowDefinition>,
     startup_task: Option<StartupTask>,
     model_task: Option<(String, JoinHandle<crate::error::Result<ModelDetails>>)>,
     type_task: Option<(String, JoinHandle<crate::error::Result<TypeDescription>>)>,
     data_task: Option<(String, JoinHandle<crate::error::Result<Vec<DataArtifact>>>)>,
+    workflow_task: Option<(String, JoinHandle<crate::error::Result<WorkflowDefinition>>)>,
     preload_task: Option<JoinHandle<()>>,
     preload_receiver: Option<mpsc::UnboundedReceiver<PreloadEvent>>,
     preloading_models: HashSet<String>,
     preloading_types: HashSet<String>,
+    preloading_workflows: HashSet<String>,
     preload_total: usize,
     preload_complete: usize,
 }
@@ -128,6 +145,11 @@ impl App {
             models: Vec::new(),
             filtered_models: Vec::new(),
             model_index: 0,
+            workflows: Vec::new(),
+            filtered_workflows: Vec::new(),
+            workflow_index: 0,
+            workflow: None,
+            workflow_node_index: 0,
             detail: None,
             type_description: None,
             method_index: 0,
@@ -155,14 +177,17 @@ impl App {
             model_cache: HashMap::new(),
             type_cache: HashMap::new(),
             data_cache: HashMap::new(),
+            workflow_cache: HashMap::new(),
             startup_task: None,
             model_task: None,
             type_task: None,
             data_task: None,
+            workflow_task: None,
             preload_task: None,
             preload_receiver: None,
             preloading_models: HashSet::new(),
             preloading_types: HashSet::new(),
+            preloading_workflows: HashSet::new(),
             preload_total: 0,
             preload_complete: 0,
         }
@@ -181,24 +206,34 @@ impl App {
         if let Some((_, task)) = self.data_task.take() {
             task.abort();
         }
+        if let Some((_, task)) = self.workflow_task.take() {
+            task.abort();
+        }
         if let Some(task) = self.preload_task.take() {
             task.abort();
         }
         self.preload_receiver = None;
         self.preloading_models.clear();
         self.preloading_types.clear();
+        self.preloading_workflows.clear();
         let client = Arc::clone(&self.client);
-        self.status = "Loading models…".to_owned();
+        self.status = "Loading repository…".to_owned();
         self.startup_task = Some(tokio::spawn(async move {
-            tokio::join!(client.version(), client.models(), client.all_data())
+            tokio::join!(
+                client.version(),
+                client.models(),
+                client.all_data(),
+                client.workflows()
+            )
         }));
     }
 
     pub async fn load(&mut self) {
-        let (version, models, all_data) = tokio::join!(
+        let (version, models, all_data, workflows) = tokio::join!(
             self.client.version(),
             self.client.models(),
-            self.client.all_data()
+            self.client.all_data(),
+            self.client.workflows()
         );
         match version {
             Ok(version) => self.swamp_version = version,
@@ -215,6 +250,11 @@ impl App {
         if let Ok(artifacts) = all_data {
             self.cache_all_data(artifacts);
         }
+        if let Ok(workflows) = workflows {
+            self.workflows = workflows;
+            self.apply_filter();
+            self.load_selected_workflow().await;
+        }
     }
 
     pub fn visible_models(&self) -> impl Iterator<Item = &ModelSummary> {
@@ -227,6 +267,29 @@ impl App {
         self.filtered_models
             .get(self.model_index)
             .and_then(|index| self.models.get(*index))
+    }
+
+    pub fn visible_workflows(&self) -> impl Iterator<Item = &WorkflowSummary> {
+        self.filtered_workflows
+            .iter()
+            .filter_map(|index| self.workflows.get(*index))
+    }
+
+    pub fn selected_workflow(&self) -> Option<&WorkflowSummary> {
+        self.filtered_workflows
+            .get(self.workflow_index)
+            .and_then(|index| self.workflows.get(*index))
+    }
+
+    pub fn workflow_nodes(&self) -> Vec<WorkflowNode<'_>> {
+        self.workflow
+            .as_ref()
+            .map(WorkflowDefinition::nodes)
+            .unwrap_or_default()
+    }
+
+    pub fn selected_workflow_node(&self) -> Option<WorkflowNode<'_>> {
+        self.workflow_nodes().get(self.workflow_node_index).copied()
     }
 
     pub fn selected_method(&self) -> Option<&MethodSpec> {
@@ -319,6 +382,7 @@ impl App {
             KeyCode::Char('1') => self.activate_tab(Tab::Overview),
             KeyCode::Char('2') => self.activate_tab(Tab::Methods),
             KeyCode::Char('3') => self.activate_tab(Tab::Data),
+            KeyCode::Char('4') => self.activate_tab(Tab::Workflows),
             KeyCode::Tab | KeyCode::BackTab => {
                 self.focus = match self.focus {
                     Focus::Models => Focus::Content,
@@ -330,6 +394,7 @@ impl App {
                     self.model_cache.clear();
                     self.type_cache.clear();
                     self.data_cache.clear();
+                    self.workflow_cache.clear();
                     self.begin_load();
                 } else {
                     self.refresh_current();
@@ -367,8 +432,13 @@ impl App {
             }
             KeyCode::Enter => {
                 self.mode = InputMode::Normal;
-                self.model_index = 0;
-                self.selection_changed();
+                if self.tab == Tab::Workflows {
+                    self.workflow_index = 0;
+                    self.workflow_selection_changed();
+                } else {
+                    self.model_index = 0;
+                    self.selection_changed();
+                }
             }
             KeyCode::Backspace => {
                 self.search.pop();
@@ -508,6 +578,12 @@ impl App {
                 abort_named_task(&mut self.type_task);
                 self.schedule_data(false);
             }
+            Tab::Workflows => {
+                abort_named_task(&mut self.model_task);
+                abort_named_task(&mut self.type_task);
+                abort_named_task(&mut self.data_task);
+                self.schedule_workflow(false);
+            }
         }
     }
 
@@ -544,7 +620,19 @@ impl App {
                 abort_named_task(&mut self.type_task);
                 self.schedule_data(false);
             }
+            Tab::Workflows => {}
         }
+    }
+
+    fn workflow_selection_changed(&mut self) {
+        self.workflow_node_index = 0;
+        let Some(workflow) = self.selected_workflow().cloned() else {
+            self.workflow = None;
+            self.status = "No workflows found".to_owned();
+            return;
+        };
+        self.workflow = self.workflow_cache.get(&workflow.name).cloned();
+        self.schedule_workflow(false);
     }
 
     fn cache_all_data(&mut self, artifacts: Vec<DataArtifact>) {
@@ -595,10 +683,16 @@ impl App {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
+        let mut workflow_names: Vec<String> = self
+            .workflows
+            .iter()
+            .map(|workflow| workflow.name.clone())
+            .collect();
 
         self.preloading_models = model_names.iter().cloned().collect();
         self.preloading_types = model_types.iter().cloned().collect();
-        self.preload_total = model_names.len() + model_types.len();
+        self.preloading_workflows = workflow_names.iter().cloned().collect();
+        self.preload_total = model_names.len() + model_types.len() + workflow_names.len();
         self.preload_complete = 0;
         if self.preload_total == 0 {
             return;
@@ -611,11 +705,21 @@ impl App {
         let semaphore = Arc::new(Semaphore::new(workers));
         let client = Arc::clone(&self.client);
         let (sender, receiver) = mpsc::unbounded_channel();
+        let mut requests = Vec::with_capacity(self.preload_total);
+        if !model_names.is_empty() {
+            requests.push(PreloadRequest::Model(model_names.remove(0)));
+        }
+        if !workflow_names.is_empty() {
+            requests.push(PreloadRequest::Workflow(workflow_names.remove(0)));
+        }
+        requests.extend(model_names.into_iter().map(PreloadRequest::Model));
+        requests.extend(workflow_names.into_iter().map(PreloadRequest::Workflow));
+        requests.extend(model_types.into_iter().map(PreloadRequest::Type));
         self.preload_receiver = Some(receiver);
         self.status = format!("Preloading 0/{}…", self.preload_total);
         self.preload_task = Some(tokio::spawn(async move {
             let mut tasks = JoinSet::new();
-            for name in model_names {
+            for request in requests {
                 let client = Arc::clone(&client);
                 let semaphore = Arc::clone(&semaphore);
                 let sender = sender.clone();
@@ -623,20 +727,20 @@ impl App {
                     let Ok(_permit) = semaphore.acquire_owned().await else {
                         return;
                     };
-                    let result = client.model(&name).await;
-                    let _ = sender.send(PreloadEvent::Model(name, result));
-                });
-            }
-            for model_type in model_types {
-                let client = Arc::clone(&client);
-                let semaphore = Arc::clone(&semaphore);
-                let sender = sender.clone();
-                tasks.spawn(async move {
-                    let Ok(_permit) = semaphore.acquire_owned().await else {
-                        return;
+                    match request {
+                        PreloadRequest::Model(name) => {
+                            let result = client.model(&name).await;
+                            let _ = sender.send(PreloadEvent::Model(name, result));
+                        }
+                        PreloadRequest::Type(model_type) => {
+                            let result = client.describe_type(&model_type).await;
+                            let _ = sender.send(PreloadEvent::Type(model_type, result));
+                        }
+                        PreloadRequest::Workflow(name) => {
+                            let result = client.workflow(&name).await;
+                            let _ = sender.send(PreloadEvent::Workflow(name, result));
+                        }
                     };
-                    let result = client.describe_type(&model_type).await;
-                    let _ = sender.send(PreloadEvent::Type(model_type, result));
                 });
             }
             while tasks.join_next().await.is_some() {}
@@ -728,6 +832,35 @@ impl App {
         ));
     }
 
+    fn schedule_workflow(&mut self, force: bool) {
+        let Some(workflow) = self.selected_workflow().cloned() else {
+            return;
+        };
+        if !force && self.workflow_cache.contains_key(&workflow.name) {
+            self.workflow = self.workflow_cache.get(&workflow.name).cloned();
+            return;
+        }
+        if !force && self.preloading_workflows.contains(&workflow.name) {
+            self.status = format!("Preloading workflow {}…", workflow.name);
+            return;
+        }
+        if let Some((_, task)) = self.workflow_task.take() {
+            task.abort();
+        }
+        let client = Arc::clone(&self.client);
+        let name = workflow.name.clone();
+        let task_name = name.clone();
+        let delay = if force { 0 } else { 120 };
+        self.status = format!("Loading workflow {name}…");
+        self.workflow_task = Some((
+            name,
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(delay)).await;
+                client.workflow(&task_name).await
+            }),
+        ));
+    }
+
     async fn poll_background(&mut self) {
         if self
             .startup_task
@@ -736,7 +869,7 @@ impl App {
         {
             let task = self.startup_task.take().expect("checked above");
             match task.await {
-                Ok((version, models, all_data)) => {
+                Ok((version, models, all_data, workflows)) => {
                     match version {
                         Ok(version) => self.swamp_version = version,
                         Err(error) => self.fail(error.to_string()),
@@ -758,9 +891,22 @@ impl App {
                         Ok(_) => {}
                         Err(error) => self.error = Some(error.to_string()),
                     }
+                    match workflows {
+                        Ok(workflows) => {
+                            self.workflows = workflows;
+                            self.apply_filter();
+                            self.workflow_index = self
+                                .workflow_index
+                                .min(self.filtered_workflows.len().saturating_sub(1));
+                        }
+                        Err(error) => self.error = Some(error.to_string()),
+                    }
                     if models_loaded {
                         self.start_preloading();
                         self.selection_changed();
+                        if self.tab == Tab::Workflows {
+                            self.workflow_selection_changed();
+                        }
                     }
                 }
                 Err(error) => self.fail(format!("Startup task failed: {error}")),
@@ -866,6 +1012,41 @@ impl App {
             }
         }
 
+        if self
+            .workflow_task
+            .as_ref()
+            .is_some_and(|(_, task)| task.is_finished())
+        {
+            let (name, task) = self.workflow_task.take().expect("checked above");
+            match task.await {
+                Ok(Ok(workflow)) => {
+                    self.workflow_cache.insert(name.clone(), workflow.clone());
+                    if self
+                        .selected_workflow()
+                        .is_some_and(|selected| selected.name == name)
+                    {
+                        self.workflow = Some(workflow);
+                        self.workflow_node_index = self
+                            .workflow_node_index
+                            .min(self.workflow_nodes().len().saturating_sub(1));
+                        self.status = format!("Loaded workflow {name}");
+                    }
+                }
+                Ok(Err(error)) => {
+                    if self
+                        .selected_workflow()
+                        .is_some_and(|selected| selected.name == name)
+                    {
+                        self.fail(error.to_string());
+                    }
+                }
+                Err(error) if !error.is_cancelled() => {
+                    self.fail(format!("Workflow loading task failed: {error}"));
+                }
+                Err(_) => {}
+            }
+        }
+
         let mut preload_events = Vec::new();
         if let Some(receiver) = self.preload_receiver.as_mut() {
             while let Ok(event) = receiver.try_recv() {
@@ -913,9 +1094,39 @@ impl App {
                     // contain the methods needed for browsing and execution. Missing extension
                     // types stay silent here, and opening Methods can retry them explicitly.
                 }
+                PreloadEvent::Workflow(name, result) => {
+                    self.preloading_workflows.remove(&name);
+                    match result {
+                        Ok(workflow) => {
+                            self.workflow_cache.insert(name.clone(), workflow.clone());
+                            if self
+                                .selected_workflow()
+                                .is_some_and(|selected| selected.name == name)
+                            {
+                                self.workflow = Some(workflow);
+                                self.workflow_node_index = self
+                                    .workflow_node_index
+                                    .min(self.workflow_nodes().len().saturating_sub(1));
+                            }
+                        }
+                        Err(error) => {
+                            if self.tab == Tab::Workflows
+                                && self
+                                    .selected_workflow()
+                                    .is_some_and(|selected| selected.name == name)
+                            {
+                                self.error = Some(error.to_string());
+                            }
+                        }
+                    }
+                }
             }
             self.status = if self.preload_complete == self.preload_total {
-                format!("Preloaded {} model(s)", self.models.len())
+                format!(
+                    "Preloaded {} model(s), {} workflow(s)",
+                    self.models.len(),
+                    self.workflows.len()
+                )
             } else {
                 format!(
                     "Preloading {}/{}…",
@@ -959,6 +1170,21 @@ impl App {
         }
     }
 
+    async fn load_selected_workflow(&mut self) {
+        let Some(workflow) = self.selected_workflow().cloned() else {
+            self.workflow = None;
+            return;
+        };
+        match self.client.workflow(&workflow.name).await {
+            Ok(definition) => {
+                self.workflow_cache
+                    .insert(workflow.name.clone(), definition.clone());
+                self.workflow = Some(definition);
+            }
+            Err(error) => self.fail(error.to_string()),
+        }
+    }
+
     fn refresh_current(&mut self) {
         match self.tab {
             Tab::Overview => self.schedule_model(true),
@@ -967,11 +1193,24 @@ impl App {
                 self.schedule_type(true);
             }
             Tab::Data => self.schedule_data(true),
+            Tab::Workflows => self.schedule_workflow(true),
         }
     }
 
     async fn move_selection(&mut self, direction: isize) {
         if self.focus == Focus::Models {
+            if self.tab == Tab::Workflows {
+                let previous = self.workflow_index;
+                self.workflow_index = move_index(
+                    self.workflow_index,
+                    self.filtered_workflows.len(),
+                    direction,
+                );
+                if previous != self.workflow_index {
+                    self.workflow_selection_changed();
+                }
+                return;
+            }
             let previous = self.model_index;
             self.model_index = move_index(self.model_index, self.filtered_models.len(), direction);
             if previous != self.model_index {
@@ -994,6 +1233,13 @@ impl App {
                 self.artifact_index =
                     move_index(self.artifact_index, self.artifacts.len(), direction);
                 self.clear_data_view();
+            }
+            Tab::Workflows => {
+                self.workflow_node_index = move_index(
+                    self.workflow_node_index,
+                    self.workflow_nodes().len(),
+                    direction,
+                );
             }
         }
     }
@@ -1026,6 +1272,7 @@ impl App {
                     self.request_latest().await;
                 }
             }
+            Tab::Workflows => {}
         }
     }
 
@@ -1253,6 +1500,20 @@ impl App {
         self.model_index = self
             .model_index
             .min(self.filtered_models.len().saturating_sub(1));
+        self.filtered_workflows = self
+            .workflows
+            .iter()
+            .enumerate()
+            .filter(|(_, workflow)| {
+                needle.is_empty()
+                    || workflow.name.to_ascii_lowercase().contains(&needle)
+                    || workflow.description.to_ascii_lowercase().contains(&needle)
+            })
+            .map(|(index, _)| index)
+            .collect();
+        self.workflow_index = self
+            .workflow_index
+            .min(self.filtered_workflows.len().saturating_sub(1));
     }
 
     fn clear_data_view(&mut self) {
@@ -1411,11 +1672,24 @@ mod tests {
         assert!(startup_calls.contains(&"model".to_owned()));
         assert!(startup_calls.contains(&"describe".to_owned()));
         assert!(startup_calls.contains(&"all_data".to_owned()));
+        assert!(startup_calls.contains(&"workflows".to_owned()));
+        assert!(startup_calls.contains(&"workflow".to_owned()));
         assert!(!startup_calls.contains(&"data".to_owned()));
 
         app.activate_tab(Tab::Data);
         assert_eq!(app.artifacts.len(), 1);
         assert!(!calls.lock().unwrap().contains(&"data".to_owned()));
+
+        app.activate_tab(Tab::Workflows);
+        assert_eq!(app.workflow_nodes().len(), 5);
+        app.focus = Focus::Content;
+        app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
+            .await;
+        assert_eq!(app.workflow_node_index, 1);
+        assert_eq!(
+            app.selected_workflow_node().unwrap().step.name,
+            "collect-friend"
+        );
     }
 
     struct MockClient {
@@ -1500,6 +1774,22 @@ mod tests {
         async fn data(&self, _model: &str) -> Result<Vec<DataArtifact>> {
             self.calls.lock().unwrap().push("data".to_owned());
             Ok(vec![artifact()])
+        }
+
+        async fn workflows(&self) -> Result<Vec<WorkflowSummary>> {
+            self.calls.lock().unwrap().push("workflows".to_owned());
+            Ok(vec![WorkflowSummary {
+                id: "workflow-id".to_owned(),
+                name: "hello-flow".to_owned(),
+                description: "Run hello".to_owned(),
+                job_count: 1,
+                has_inputs: false,
+            }])
+        }
+
+        async fn workflow(&self, _name: &str) -> Result<WorkflowDefinition> {
+            self.calls.lock().unwrap().push("workflow".to_owned());
+            Ok(serde_json::from_str(include_str!("../tests/fixtures/workflow-get.json")).unwrap())
         }
 
         async fn latest_data(&self, _model: &str, _name: &str) -> Result<DataContent> {

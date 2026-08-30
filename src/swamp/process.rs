@@ -11,7 +11,7 @@ use tokio::{
 
 use super::{
     DataArtifact, DataContent, DataVersion, ModelDetails, ModelSummary, SwampClient,
-    TypeDescription,
+    TypeDescription, WorkflowDefinition, WorkflowSummary,
     data::{DataListResponse, QueryResponse, VersionsResponse},
 };
 use crate::error::{Error, Result};
@@ -257,6 +257,33 @@ impl SwampClient for SwampCli {
             .collect();
         artifacts.sort_by(|left, right| right.created_at.cmp(&left.created_at));
         Ok(artifacts)
+    }
+
+    async fn workflows(&self) -> Result<Vec<WorkflowSummary>> {
+        #[derive(Deserialize)]
+        struct Response {
+            #[serde(default)]
+            results: Vec<WorkflowSummary>,
+        }
+        let value = self
+            .json(&["workflow", "search"], "workflow search")
+            .await?;
+        serde_json::from_value::<Response>(value)
+            .map(|response| response.results)
+            .map_err(|source| Error::Json {
+                context: "workflow search",
+                source,
+            })
+    }
+
+    async fn workflow(&self, name: &str) -> Result<WorkflowDefinition> {
+        let value = self
+            .json(&["workflow", "get", name], "workflow details")
+            .await?;
+        serde_json::from_value(value).map_err(|source| Error::Json {
+            context: "workflow details",
+            source,
+        })
     }
 
     async fn data(&self, model: &str) -> Result<Vec<DataArtifact>> {

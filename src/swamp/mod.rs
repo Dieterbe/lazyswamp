@@ -1,10 +1,12 @@
 mod data;
 mod model;
 mod process;
+mod workflow;
 
 pub use data::{DataArtifact, DataContent, DataVersion};
 pub use model::{MethodSpec, ModelDetails, ModelSummary, TypeDescription, TypeName};
 pub use process::{RunEvent, SwampCli};
+pub use workflow::{WorkflowDefinition, WorkflowNode, WorkflowStep, WorkflowSummary, WorkflowTask};
 
 use async_trait::async_trait;
 use serde_json::Value;
@@ -27,6 +29,8 @@ pub trait SwampClient: Send + Sync {
     ) -> Result<mpsc::UnboundedReceiver<RunEvent>>;
     async fn cancel_method(&self, model: &str) -> Result<()>;
     async fn all_data(&self) -> Result<Vec<DataArtifact>>;
+    async fn workflows(&self) -> Result<Vec<WorkflowSummary>>;
+    async fn workflow(&self, name: &str) -> Result<WorkflowDefinition>;
     async fn data(&self, model: &str) -> Result<Vec<DataArtifact>>;
     async fn latest_data(&self, model: &str, name: &str) -> Result<DataContent>;
     async fn data_versions(&self, model: &str, name: &str) -> Result<Vec<DataVersion>>;

@@ -2,7 +2,7 @@
 
 Lazyswamp is a terminal interface for [Swamp](https://swamp.club). It lets you
 browse managed models, run their methods through schema-derived forms, and
-inspect the versioned data those methods produce.
+inspect versioned data and workflow dependency graphs.
 
 ## Features
 
@@ -12,6 +12,8 @@ inspect the versioned data those methods produce.
   review; destructive-looking methods also require the model name.
 - Browse artifact metadata and content, select historical versions, and compare
   JSON structurally or UTF-8 text line by line.
+- Browse workflows as routed DAGs with arrows, select individual steps, and
+  inspect their dependencies, conditions, task types, and inputs.
 
 Lazyswamp is deliberately read-only apart from running and cancelling model
 methods. It does not create models or rename, prune, garbage-collect, or delete
@@ -46,10 +48,10 @@ lazyswamp --repo-dir /path/to/repo --swamp-bin /path/to/swamp
 | Key | Action |
 | --- | --- |
 | Arrow keys or `j`/`k` | Move the active selection |
-| `Tab` | Switch between model and content focus |
-| `1`, `2`, `3` | Open Overview, Methods, or Data |
+| `Tab` | Switch between list and content focus |
+| `1`, `2`, `3`, `4` | Open Overview, Methods, Data, or Workflows |
 | `Enter` | Open, load, validate, or confirm |
-| `/` | Filter models by name or type |
+| `/` | Filter the current model or workflow list |
 | `r` | Refresh the current view |
 | `[` / `]` | Select a data version |
 | `a` / `b` | Mark the two versions to compare |
@@ -79,20 +81,28 @@ while data is queried through Swamp's versioned catalog. Reading `.swamp/`
 directly was rejected because it would bypass datastore abstractions and couple
 the UI to private storage layouts.
 
-The interface renders before startup probes finish. The initial model search is
-run alongside one repository-wide query for the latest data metadata. As soon
-as the model list arrives, Lazyswamp preloads every model definition and each
-unique type description with an adaptive pool of 4–12 workers. Results are
-cached as each worker finishes, so browsing becomes progressively instant while
-preloading continues. Artifact content remains on demand because it can be
-large. Loading models only after selection was considered, but rejected because
-it made browsing latency proportional to the startup cost of each `swamp`
-invocation.
+The interface renders before startup probes finish. Model and workflow searches
+run alongside one repository-wide query for the latest data metadata. Lazyswamp
+then preloads every model definition, workflow definition, and unique model type
+description with an adaptive pool of 4–12 workers. The selected model and first
+workflow are prioritized, and results are cached as each worker finishes, so
+browsing becomes progressively instant. Artifact content remains on demand
+because it can be large. Loading definitions only after selection was
+considered, but rejected because it made browsing latency proportional to the
+startup cost of each `swamp` invocation.
+
+Workflow graphs are rendered from `swamp workflow search --json` and
+`swamp workflow get --json`. Capturing Swamp's built-in `--graph` text was
+considered, but rejected because static terminal output cannot support node
+selection, responsive layout, or a details panel. Lazyswamp uses a native
+layered layout with routed connectors and arrowheads because workflows are DAG
+orchestrators over model methods, as described by Swamp's `design/workflow.md`.
 
 The first release supports local repositories only. Remote `swamp serve`
-connections, workflows, reports, model creation, a complete JSON Schema UI,
-concurrent runs, crates.io publication, and prebuilt release binaries were
-considered but deferred to keep the initial safety and browsing flows focused.
+connections, workflow execution and history, reports, model creation, a complete
+JSON Schema UI, concurrent runs, crates.io publication, and prebuilt release
+binaries were considered but deferred to keep the initial safety and browsing
+flows focused.
 
 ## Development
 

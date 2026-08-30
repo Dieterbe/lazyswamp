@@ -1,0 +1,51 @@
+{
+  "id": "9d5ce0d9-7525-48bc-97ab-0ef80e08656e",
+  "name": "update-weight-dashboard",
+  "description": "Collect both weight sources, render their CSV into Grafana Infinity, and update the dashboard.",
+  "version": 1,
+  "tags": {},
+  "jobs": [
+    {
+      "name": "main",
+      "description": "Refresh weight data and deploy dashboard.",
+      "dependsOn": [],
+      "steps": [
+        {
+          "name": "collect-dieter",
+          "description": "Synchronize Dieter's measurements.",
+          "dependsOn": [],
+          "task": {"type": "model_method", "modelIdOrName": "dieter-bodybuild", "methodName": "syncFromBackup"}
+        },
+        {
+          "name": "collect-friend",
+          "description": "Synchronize friend's measurements.",
+          "dependsOn": [],
+          "task": {"type": "model_method", "modelIdOrName": "friend-logseq-weight", "methodName": "sync"}
+        },
+        {
+          "name": "export-dashboard",
+          "description": "Export the dashboard.",
+          "dependsOn": [],
+          "task": {"type": "model_method", "modelIdOrName": "weight-grafana", "methodName": "exportDashboard"}
+        },
+        {
+          "name": "render-dashboard",
+          "description": "Inject the latest datasets.",
+          "dependsOn": [
+            {"step": "collect-dieter", "condition": {"type": "succeeded"}},
+            {"step": "collect-friend", "condition": {"type": "succeeded"}},
+            {"step": "export-dashboard", "condition": {"type": "succeeded"}}
+          ],
+          "task": {"type": "model_method", "modelIdOrName": "weight-grafana", "methodName": "renderWeightDashboard"}
+        },
+        {
+          "name": "push-dashboard",
+          "description": "Update the dashboard.",
+          "dependsOn": [{"step": "render-dashboard", "condition": {"type": "succeeded"}}],
+          "task": {"type": "model_method", "modelIdOrName": "weight-grafana", "methodName": "pushRenderedWeightDashboard"}
+        }
+      ]
+    }
+  ],
+  "path": "/repo/workflows/workflow-id.yaml"
+}
