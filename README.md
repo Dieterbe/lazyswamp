@@ -79,6 +79,16 @@ while data is queried through Swamp's versioned catalog. Reading `.swamp/`
 directly was rejected because it would bypass datastore abstractions and couple
 the UI to private storage layouts.
 
+The interface renders before startup probes finish. The initial model search is
+run alongside one repository-wide query for the latest data metadata. As soon
+as the model list arrives, Lazyswamp preloads every model definition and each
+unique type description with an adaptive pool of 4–12 workers. Results are
+cached as each worker finishes, so browsing becomes progressively instant while
+preloading continues. Artifact content remains on demand because it can be
+large. Loading models only after selection was considered, but rejected because
+it made browsing latency proportional to the startup cost of each `swamp`
+invocation.
+
 The first release supports local repositories only. Remote `swamp serve`
 connections, workflows, reports, model creation, a complete JSON Schema UI,
 concurrent runs, crates.io publication, and prebuilt release binaries were

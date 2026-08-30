@@ -1,8 +1,15 @@
-use std::sync::Arc;
+use std::{
+    collections::{BTreeSet, HashMap, HashSet},
+    sync::Arc,
+    time::Duration,
+};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde_json::Value;
-use tokio::sync::mpsc;
+use tokio::{
+    sync::{Semaphore, mpsc},
+    task::{JoinHandle, JoinSet},
+};
 
 use crate::{
     config::Config,
@@ -15,6 +22,18 @@ use crate::{
         SwampClient, TypeDescription,
     },
 };
+
+type StartupOutcome = (
+    crate::error::Result<String>,
+    crate::error::Result<Vec<ModelSummary>>,
+    crate::error::Result<Vec<DataArtifact>>,
+);
+type StartupTask = JoinHandle<StartupOutcome>;
+
+enum PreloadEvent {
+    Model(String, crate::error::Result<ModelDetails>),
+    Type(String, crate::error::Result<TypeDescription>),
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
@@ -85,6 +104,19 @@ pub struct App {
     pub running_model: Option<String>,
     pub should_quit: bool,
     refresh_after_run: bool,
+    model_cache: HashMap<String, ModelDetails>,
+    type_cache: HashMap<String, TypeDescription>,
+    data_cache: HashMap<String, Vec<DataArtifact>>,
+    startup_task: Option<StartupTask>,
+    model_task: Option<(String, JoinHandle<crate::error::Result<ModelDetails>>)>,
+    type_task: Option<(String, JoinHandle<crate::error::Result<TypeDescription>>)>,
+    data_task: Option<(String, JoinHandle<crate::error::Result<Vec<DataArtifact>>>)>,
+    preload_task: Option<JoinHandle<()>>,
+    preload_receiver: Option<mpsc::UnboundedReceiver<PreloadEvent>>,
+    preloading_models: HashSet<String>,
+    preloading_types: HashSet<String>,
+    preload_total: usize,
+    preload_complete: usize,
 }
 
 impl App {
@@ -120,18 +152,69 @@ impl App {
             running_model: None,
             should_quit: false,
             refresh_after_run: false,
+            model_cache: HashMap::new(),
+            type_cache: HashMap::new(),
+            data_cache: HashMap::new(),
+            startup_task: None,
+            model_task: None,
+            type_task: None,
+            data_task: None,
+            preload_task: None,
+            preload_receiver: None,
+            preloading_models: HashSet::new(),
+            preloading_types: HashSet::new(),
+            preload_total: 0,
+            preload_complete: 0,
         }
     }
 
-    pub async fn load(&mut self) {
-        match self.client.version().await {
-            Ok(version) => self.swamp_version = version,
-            Err(error) => {
-                self.fail(error.to_string());
-                return;
-            }
+    pub fn begin_load(&mut self) {
+        if let Some(task) = self.startup_task.take() {
+            task.abort();
         }
-        self.refresh_models().await;
+        if let Some((_, task)) = self.model_task.take() {
+            task.abort();
+        }
+        if let Some((_, task)) = self.type_task.take() {
+            task.abort();
+        }
+        if let Some((_, task)) = self.data_task.take() {
+            task.abort();
+        }
+        if let Some(task) = self.preload_task.take() {
+            task.abort();
+        }
+        self.preload_receiver = None;
+        self.preloading_models.clear();
+        self.preloading_types.clear();
+        let client = Arc::clone(&self.client);
+        self.status = "Loading models…".to_owned();
+        self.startup_task = Some(tokio::spawn(async move {
+            tokio::join!(client.version(), client.models(), client.all_data())
+        }));
+    }
+
+    pub async fn load(&mut self) {
+        let (version, models, all_data) = tokio::join!(
+            self.client.version(),
+            self.client.models(),
+            self.client.all_data()
+        );
+        match version {
+            Ok(version) => self.swamp_version = version,
+            Err(error) => self.fail(error.to_string()),
+        }
+        match models {
+            Ok(models) => {
+                self.models = models;
+                self.apply_filter();
+                self.load_selected_model().await;
+            }
+            Err(error) => self.fail(error.to_string()),
+        }
+        if let Ok(artifacts) = all_data {
+            self.cache_all_data(artifacts);
+        }
     }
 
     pub fn visible_models(&self) -> impl Iterator<Item = &ModelSummary> {
@@ -184,6 +267,7 @@ impl App {
     }
 
     pub async fn tick(&mut self) {
+        self.poll_background().await;
         let mut completed = None;
         if let Some(receiver) = self.run_receiver.as_mut() {
             while let Ok(event) = receiver.try_recv() {
@@ -210,7 +294,7 @@ impl App {
         }
         if self.refresh_after_run {
             self.refresh_after_run = false;
-            self.refresh_data().await;
+            self.schedule_data(true);
         }
     }
 
@@ -232,15 +316,9 @@ impl App {
                 self.search.clear();
                 self.mode = InputMode::Search;
             }
-            KeyCode::Char('1') if self.tab != Tab::Data || self.focus == Focus::Models => {
-                self.tab = Tab::Overview
-            }
-            KeyCode::Char('2') if self.tab != Tab::Data || self.focus == Focus::Models => {
-                self.tab = Tab::Methods
-            }
-            KeyCode::Char('3') if self.tab != Tab::Data || self.focus == Focus::Models => {
-                self.tab = Tab::Data
-            }
+            KeyCode::Char('1') => self.activate_tab(Tab::Overview),
+            KeyCode::Char('2') => self.activate_tab(Tab::Methods),
+            KeyCode::Char('3') => self.activate_tab(Tab::Data),
             KeyCode::Tab | KeyCode::BackTab => {
                 self.focus = match self.focus {
                     Focus::Models => Focus::Content,
@@ -249,9 +327,12 @@ impl App {
             }
             KeyCode::Char('r') => {
                 if self.focus == Focus::Models {
-                    self.refresh_models().await;
+                    self.model_cache.clear();
+                    self.type_cache.clear();
+                    self.data_cache.clear();
+                    self.begin_load();
                 } else {
-                    self.refresh_current().await;
+                    self.refresh_current();
                 }
             }
             KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1).await,
@@ -287,7 +368,7 @@ impl App {
             KeyCode::Enter => {
                 self.mode = InputMode::Normal;
                 self.model_index = 0;
-                self.load_selected_model().await;
+                self.selection_changed();
             }
             KeyCode::Backspace => {
                 self.search.pop();
@@ -410,19 +491,437 @@ impl App {
         }
     }
 
-    async fn refresh_models(&mut self) {
-        self.status = "Loading models…".to_owned();
-        match self.client.models().await {
-            Ok(models) => {
-                self.models = models;
-                self.apply_filter();
-                self.model_index = self
-                    .model_index
-                    .min(self.filtered_models.len().saturating_sub(1));
-                self.status = format!("{} model(s)", self.models.len());
-                self.load_selected_model().await;
+    fn activate_tab(&mut self, tab: Tab) {
+        self.tab = tab;
+        match tab {
+            Tab::Overview => {
+                abort_named_task(&mut self.type_task);
+                abort_named_task(&mut self.data_task);
+                self.schedule_model(false);
             }
-            Err(error) => self.fail(error.to_string()),
+            Tab::Methods => {
+                abort_named_task(&mut self.data_task);
+                self.schedule_model(false);
+                self.schedule_type(false);
+            }
+            Tab::Data => {
+                abort_named_task(&mut self.type_task);
+                self.schedule_data(false);
+            }
+        }
+    }
+
+    fn selection_changed(&mut self) {
+        self.method_index = 0;
+        self.artifact_index = 0;
+        self.clear_data_view();
+
+        let Some(model) = self.selected_model().cloned() else {
+            self.detail = None;
+            self.type_description = None;
+            self.artifacts.clear();
+            self.status = "No models found".to_owned();
+            return;
+        };
+        self.detail = self.model_cache.get(&model.name).cloned();
+        self.type_description = self.type_cache.get(&model.model_type).cloned();
+        self.artifacts = self
+            .data_cache
+            .get(&model.name)
+            .cloned()
+            .unwrap_or_default();
+        self.schedule_model(false);
+        match self.tab {
+            Tab::Overview => {
+                abort_named_task(&mut self.type_task);
+                abort_named_task(&mut self.data_task);
+            }
+            Tab::Methods => {
+                abort_named_task(&mut self.data_task);
+                self.schedule_type(false);
+            }
+            Tab::Data => {
+                abort_named_task(&mut self.type_task);
+                self.schedule_data(false);
+            }
+        }
+    }
+
+    fn cache_all_data(&mut self, artifacts: Vec<DataArtifact>) {
+        self.data_cache.clear();
+        for model in &self.models {
+            self.data_cache.entry(model.name.clone()).or_default();
+        }
+        for mut artifact in artifacts {
+            let model_name = if artifact.model_name.is_empty() {
+                self.models
+                    .iter()
+                    .find(|model| model.id == artifact.model_id)
+                    .map(|model| model.name.clone())
+            } else {
+                Some(artifact.model_name.clone())
+            };
+            if let Some(model_name) = model_name {
+                artifact.model_name.clone_from(&model_name);
+                self.data_cache
+                    .entry(model_name)
+                    .or_default()
+                    .push(artifact);
+            }
+        }
+        for artifacts in self.data_cache.values_mut() {
+            artifacts.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+        }
+    }
+
+    fn start_preloading(&mut self) {
+        if let Some(task) = self.preload_task.take() {
+            task.abort();
+        }
+        self.preload_receiver = None;
+
+        let selected_name = self.selected_model().map(|model| model.name.clone());
+        let mut model_names: Vec<String> =
+            self.models.iter().map(|model| model.name.clone()).collect();
+        if let Some(selected_name) = selected_name
+            && let Some(index) = model_names.iter().position(|name| name == &selected_name)
+        {
+            model_names.swap(0, index);
+        }
+        let model_types: Vec<String> = self
+            .models
+            .iter()
+            .map(|model| model.model_type.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+
+        self.preloading_models = model_names.iter().cloned().collect();
+        self.preloading_types = model_types.iter().cloned().collect();
+        self.preload_total = model_names.len() + model_types.len();
+        self.preload_complete = 0;
+        if self.preload_total == 0 {
+            return;
+        }
+
+        let workers = std::thread::available_parallelism()
+            .map_or(4, usize::from)
+            .clamp(4, 12)
+            .min(self.preload_total);
+        let semaphore = Arc::new(Semaphore::new(workers));
+        let client = Arc::clone(&self.client);
+        let (sender, receiver) = mpsc::unbounded_channel();
+        self.preload_receiver = Some(receiver);
+        self.status = format!("Preloading 0/{}…", self.preload_total);
+        self.preload_task = Some(tokio::spawn(async move {
+            let mut tasks = JoinSet::new();
+            for name in model_names {
+                let client = Arc::clone(&client);
+                let semaphore = Arc::clone(&semaphore);
+                let sender = sender.clone();
+                tasks.spawn(async move {
+                    let Ok(_permit) = semaphore.acquire_owned().await else {
+                        return;
+                    };
+                    let result = client.model(&name).await;
+                    let _ = sender.send(PreloadEvent::Model(name, result));
+                });
+            }
+            for model_type in model_types {
+                let client = Arc::clone(&client);
+                let semaphore = Arc::clone(&semaphore);
+                let sender = sender.clone();
+                tasks.spawn(async move {
+                    let Ok(_permit) = semaphore.acquire_owned().await else {
+                        return;
+                    };
+                    let result = client.describe_type(&model_type).await;
+                    let _ = sender.send(PreloadEvent::Type(model_type, result));
+                });
+            }
+            while tasks.join_next().await.is_some() {}
+        }));
+    }
+
+    fn schedule_model(&mut self, force: bool) {
+        let Some(model) = self.selected_model().cloned() else {
+            return;
+        };
+        if !force && self.model_cache.contains_key(&model.name) {
+            self.detail = self.model_cache.get(&model.name).cloned();
+            return;
+        }
+        if !force && self.preloading_models.contains(&model.name) {
+            self.status = format!("Preloading {}…", model.name);
+            return;
+        }
+        if let Some((_, task)) = self.model_task.take() {
+            task.abort();
+        }
+        let client = Arc::clone(&self.client);
+        let name = model.name.clone();
+        let task_name = name.clone();
+        let delay = if force { 0 } else { 120 };
+        self.status = format!("Loading {name}…");
+        self.model_task = Some((
+            name,
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(delay)).await;
+                client.model(&task_name).await
+            }),
+        ));
+    }
+
+    fn schedule_type(&mut self, force: bool) {
+        let Some(model) = self.selected_model().cloned() else {
+            return;
+        };
+        if !force && self.type_cache.contains_key(&model.model_type) {
+            self.type_description = self.type_cache.get(&model.model_type).cloned();
+            return;
+        }
+        if !force && self.preloading_types.contains(&model.model_type) {
+            return;
+        }
+        if let Some((_, task)) = self.type_task.take() {
+            task.abort();
+        }
+        let client = Arc::clone(&self.client);
+        let model_type = model.model_type.clone();
+        let task_type = model_type.clone();
+        let delay = if force { 0 } else { 120 };
+        self.type_task = Some((
+            model_type,
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(delay)).await;
+                client.describe_type(&task_type).await
+            }),
+        ));
+    }
+
+    fn schedule_data(&mut self, force: bool) {
+        let Some(model) = self.selected_model().cloned() else {
+            return;
+        };
+        if !force && self.data_cache.contains_key(&model.name) {
+            self.artifacts = self
+                .data_cache
+                .get(&model.name)
+                .cloned()
+                .unwrap_or_default();
+            return;
+        }
+        if let Some((_, task)) = self.data_task.take() {
+            task.abort();
+        }
+        let client = Arc::clone(&self.client);
+        let name = model.name.clone();
+        let task_name = name.clone();
+        let delay = if force { 0 } else { 120 };
+        self.status = format!("Loading data for {name}…");
+        self.data_task = Some((
+            name,
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(delay)).await;
+                client.data(&task_name).await
+            }),
+        ));
+    }
+
+    async fn poll_background(&mut self) {
+        if self
+            .startup_task
+            .as_ref()
+            .is_some_and(|task| task.is_finished())
+        {
+            let task = self.startup_task.take().expect("checked above");
+            match task.await {
+                Ok((version, models, all_data)) => {
+                    match version {
+                        Ok(version) => self.swamp_version = version,
+                        Err(error) => self.fail(error.to_string()),
+                    }
+                    let mut models_loaded = false;
+                    match models {
+                        Ok(models) => {
+                            self.models = models;
+                            self.apply_filter();
+                            self.model_index = self
+                                .model_index
+                                .min(self.filtered_models.len().saturating_sub(1));
+                            models_loaded = true;
+                        }
+                        Err(error) => self.fail(error.to_string()),
+                    }
+                    match all_data {
+                        Ok(artifacts) if models_loaded => self.cache_all_data(artifacts),
+                        Ok(_) => {}
+                        Err(error) => self.error = Some(error.to_string()),
+                    }
+                    if models_loaded {
+                        self.start_preloading();
+                        self.selection_changed();
+                    }
+                }
+                Err(error) => self.fail(format!("Startup task failed: {error}")),
+            }
+        }
+
+        if self
+            .model_task
+            .as_ref()
+            .is_some_and(|(_, task)| task.is_finished())
+        {
+            let (name, task) = self.model_task.take().expect("checked above");
+            match task.await {
+                Ok(Ok(detail)) => {
+                    self.model_cache.insert(name.clone(), detail.clone());
+                    if self
+                        .selected_model()
+                        .is_some_and(|model| model.name == name)
+                    {
+                        self.detail = Some(detail);
+                        self.status = format!("Loaded {name}");
+                    }
+                }
+                Ok(Err(error)) => {
+                    if self
+                        .selected_model()
+                        .is_some_and(|model| model.name == name)
+                    {
+                        self.fail(error.to_string());
+                    }
+                }
+                Err(error) if !error.is_cancelled() => {
+                    self.fail(format!("Model loading task failed: {error}"));
+                }
+                Err(_) => {}
+            }
+        }
+
+        if self
+            .type_task
+            .as_ref()
+            .is_some_and(|(_, task)| task.is_finished())
+        {
+            let (model_type, task) = self.type_task.take().expect("checked above");
+            match task.await {
+                Ok(Ok(description)) => {
+                    self.type_cache
+                        .insert(model_type.clone(), description.clone());
+                    if self
+                        .selected_model()
+                        .is_some_and(|model| model.model_type == model_type)
+                    {
+                        self.type_description = Some(description);
+                    }
+                }
+                Ok(Err(error)) => {
+                    if self
+                        .selected_model()
+                        .is_some_and(|model| model.model_type == model_type)
+                    {
+                        self.fail(error.to_string());
+                    }
+                }
+                Err(error) if !error.is_cancelled() => {
+                    self.fail(format!("Type loading task failed: {error}"));
+                }
+                Err(_) => {}
+            }
+        }
+
+        if self
+            .data_task
+            .as_ref()
+            .is_some_and(|(_, task)| task.is_finished())
+        {
+            let (name, task) = self.data_task.take().expect("checked above");
+            match task.await {
+                Ok(Ok(artifacts)) => {
+                    self.data_cache.insert(name.clone(), artifacts.clone());
+                    if self
+                        .selected_model()
+                        .is_some_and(|model| model.name == name)
+                    {
+                        self.artifacts = artifacts;
+                        self.artifact_index = self
+                            .artifact_index
+                            .min(self.artifacts.len().saturating_sub(1));
+                        self.status = format!("Loaded data for {name}");
+                    }
+                }
+                Ok(Err(error)) => {
+                    if self
+                        .selected_model()
+                        .is_some_and(|model| model.name == name)
+                    {
+                        self.fail(error.to_string());
+                    }
+                }
+                Err(error) if !error.is_cancelled() => {
+                    self.fail(format!("Data loading task failed: {error}"));
+                }
+                Err(_) => {}
+            }
+        }
+
+        let mut preload_events = Vec::new();
+        if let Some(receiver) = self.preload_receiver.as_mut() {
+            while let Ok(event) = receiver.try_recv() {
+                preload_events.push(event);
+            }
+        }
+        for event in preload_events {
+            self.preload_complete += 1;
+            match event {
+                PreloadEvent::Model(name, result) => {
+                    self.preloading_models.remove(&name);
+                    match result {
+                        Ok(detail) => {
+                            self.model_cache.insert(name.clone(), detail.clone());
+                            if self
+                                .selected_model()
+                                .is_some_and(|model| model.name == name)
+                            {
+                                self.detail = Some(detail);
+                            }
+                        }
+                        Err(error) => {
+                            if self
+                                .selected_model()
+                                .is_some_and(|model| model.name == name)
+                            {
+                                self.error = Some(error.to_string());
+                            }
+                        }
+                    }
+                }
+                PreloadEvent::Type(model_type, result) => {
+                    self.preloading_types.remove(&model_type);
+                    if let Ok(description) = result {
+                        self.type_cache
+                            .insert(model_type.clone(), description.clone());
+                        if self
+                            .selected_model()
+                            .is_some_and(|model| model.model_type == model_type)
+                        {
+                            self.type_description = Some(description);
+                        }
+                    }
+                    // Type descriptions only enrich output schemas; model details already
+                    // contain the methods needed for browsing and execution. Missing extension
+                    // types stay silent here, and opening Methods can retry them explicitly.
+                }
+            }
+            self.status = if self.preload_complete == self.preload_total {
+                format!("Preloaded {} model(s)", self.models.len())
+            } else {
+                format!(
+                    "Preloading {}/{}…",
+                    self.preload_complete, self.preload_total
+                )
+            };
         }
     }
 
@@ -460,26 +959,14 @@ impl App {
         }
     }
 
-    async fn refresh_current(&mut self) {
+    fn refresh_current(&mut self) {
         match self.tab {
-            Tab::Overview | Tab::Methods => self.load_selected_model().await,
-            Tab::Data => self.refresh_data().await,
-        }
-    }
-
-    async fn refresh_data(&mut self) {
-        let Some(model) = self.selected_model().map(|model| model.name.clone()) else {
-            return;
-        };
-        match self.client.data(&model).await {
-            Ok(artifacts) => {
-                self.artifacts = artifacts;
-                self.artifact_index = self
-                    .artifact_index
-                    .min(self.artifacts.len().saturating_sub(1));
-                self.status = "Data refreshed".to_owned();
+            Tab::Overview => self.schedule_model(true),
+            Tab::Methods => {
+                self.schedule_model(true);
+                self.schedule_type(true);
             }
-            Err(error) => self.fail(error.to_string()),
+            Tab::Data => self.schedule_data(true),
         }
     }
 
@@ -488,7 +975,7 @@ impl App {
             let previous = self.model_index;
             self.model_index = move_index(self.model_index, self.filtered_models.len(), direction);
             if previous != self.model_index {
-                self.load_selected_model().await;
+                self.selection_changed();
             }
             return;
         }
@@ -498,7 +985,9 @@ impl App {
                 let length = self
                     .type_description
                     .as_ref()
-                    .map_or(0, |description| description.methods.len());
+                    .map(|description| description.methods.len())
+                    .or_else(|| self.detail.as_ref().map(|detail| detail.methods.len()))
+                    .unwrap_or(0);
                 self.method_index = move_index(self.method_index, length, direction);
             }
             Tab::Data => {
@@ -792,6 +1281,12 @@ fn move_index(current: usize, length: usize, direction: isize) -> usize {
     }
 }
 
+fn abort_named_task<T>(task: &mut Option<(String, JoinHandle<T>)>) {
+    if let Some((_, task)) = task.take() {
+        task.abort();
+    }
+}
+
 fn cycle_field(field: &mut crate::schema::FormField) {
     match &field.kind {
         FieldKind::Boolean => {
@@ -887,6 +1382,42 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn background_startup_preloads_models_types_and_data() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let client = Arc::new(MockClient {
+            calls: Arc::clone(&calls),
+        });
+        let config = Config {
+            repo_dir: PathBuf::from("/repo"),
+            swamp_bin: PathBuf::from("swamp"),
+            preview_limit: DEFAULT_PREVIEW_LIMIT,
+        };
+        let mut app = App::new(config, client);
+
+        app.begin_load();
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        app.tick().await;
+        assert_eq!(app.models.len(), 1);
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        app.tick().await;
+        assert!(app.detail.is_some());
+        assert!(app.type_description.is_some());
+        assert_eq!(app.artifacts.len(), 1);
+        let startup_calls = calls.lock().unwrap().clone();
+        assert!(startup_calls.contains(&"version".to_owned()));
+        assert!(startup_calls.contains(&"models".to_owned()));
+        assert!(startup_calls.contains(&"model".to_owned()));
+        assert!(startup_calls.contains(&"describe".to_owned()));
+        assert!(startup_calls.contains(&"all_data".to_owned()));
+        assert!(!startup_calls.contains(&"data".to_owned()));
+
+        app.activate_tab(Tab::Data);
+        assert_eq!(app.artifacts.len(), 1);
+        assert!(!calls.lock().unwrap().contains(&"data".to_owned()));
+    }
+
     struct MockClient {
         calls: Arc<Mutex<Vec<String>>>,
     }
@@ -894,10 +1425,12 @@ mod tests {
     #[async_trait]
     impl SwampClient for MockClient {
         async fn version(&self) -> Result<String> {
+            self.calls.lock().unwrap().push("version".to_owned());
             Ok("swamp test".to_owned())
         }
 
         async fn models(&self) -> Result<Vec<ModelSummary>> {
+            self.calls.lock().unwrap().push("models".to_owned());
             Ok(vec![ModelSummary {
                 id: "model-id".to_owned(),
                 name: "hello-world".to_owned(),
@@ -906,6 +1439,7 @@ mod tests {
         }
 
         async fn model(&self, _name: &str) -> Result<ModelDetails> {
+            self.calls.lock().unwrap().push("model".to_owned());
             Ok(ModelDetails {
                 id: "model-id".to_owned(),
                 name: "hello-world".to_owned(),
@@ -919,6 +1453,7 @@ mod tests {
         }
 
         async fn describe_type(&self, _model_type: &str) -> Result<TypeDescription> {
+            self.calls.lock().unwrap().push("describe".to_owned());
             Ok(TypeDescription {
                 model_type: TypeName {
                     raw: "command/shell".to_owned(),
@@ -957,20 +1492,14 @@ mod tests {
             Ok(())
         }
 
+        async fn all_data(&self) -> Result<Vec<DataArtifact>> {
+            self.calls.lock().unwrap().push("all_data".to_owned());
+            Ok(vec![artifact()])
+        }
+
         async fn data(&self, _model: &str) -> Result<Vec<DataArtifact>> {
-            Ok(vec![DataArtifact {
-                id: "data-id".to_owned(),
-                name: "result".to_owned(),
-                version: 2,
-                content_type: "application/json".to_owned(),
-                data_type: "resource".to_owned(),
-                streaming: false,
-                size: 10,
-                created_at: "now".to_owned(),
-                lifetime: "infinite".to_owned(),
-                owner_type: "model-method".to_owned(),
-                tags: Default::default(),
-            }])
+            self.calls.lock().unwrap().push("data".to_owned());
+            Ok(vec![artifact()])
         }
 
         async fn latest_data(&self, _model: &str, _name: &str) -> Result<DataContent> {
@@ -1014,13 +1543,33 @@ mod tests {
         }
     }
 
+    fn artifact() -> DataArtifact {
+        DataArtifact {
+            id: "data-id".to_owned(),
+            name: "result".to_owned(),
+            model_id: "model-id".to_owned(),
+            model_name: "hello-world".to_owned(),
+            version: 2,
+            content_type: "application/json".to_owned(),
+            data_type: "resource".to_owned(),
+            streaming: false,
+            size: 10,
+            created_at: "now".to_owned(),
+            lifetime: "infinite".to_owned(),
+            owner_type: "model-method".to_owned(),
+            tags: Default::default(),
+        }
+    }
+
     fn content(version: u64) -> DataContent {
         DataContent {
             id: format!("data-{version}"),
             name: "result".to_owned(),
+            model_id: "model-id".to_owned(),
             model_name: "hello-world".to_owned(),
             version,
             content_type: "application/json".to_owned(),
+            data_type: "resource".to_owned(),
             size: 10,
             created_at: "now".to_owned(),
             lifetime: "infinite".to_owned(),

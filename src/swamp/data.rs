@@ -8,6 +8,10 @@ use serde_json::Value;
 pub struct DataArtifact {
     pub id: String,
     pub name: String,
+    #[serde(default)]
+    pub model_id: String,
+    #[serde(default)]
+    pub model_name: String,
     pub version: u64,
     #[serde(default)]
     pub content_type: String,
@@ -33,10 +37,14 @@ pub struct DataContent {
     pub id: String,
     pub name: String,
     #[serde(default)]
+    pub model_id: String,
+    #[serde(default)]
     pub model_name: String,
     pub version: u64,
     #[serde(default)]
     pub content_type: String,
+    #[serde(default)]
+    pub data_type: String,
     #[serde(default)]
     pub size: u64,
     #[serde(default)]
@@ -63,6 +71,25 @@ impl DataContent {
                 .map_or("", |owner| owner.owner_type.as_str())
         } else {
             &self.owner_type
+        }
+    }
+
+    pub(crate) fn into_artifact(self) -> DataArtifact {
+        let owner_type = self.effective_owner_type().to_owned();
+        DataArtifact {
+            id: self.id,
+            name: self.name,
+            model_id: self.model_id,
+            model_name: self.model_name,
+            version: self.version,
+            content_type: self.content_type,
+            data_type: self.data_type,
+            streaming: self.streaming,
+            size: self.size,
+            created_at: self.created_at,
+            lifetime: self.lifetime,
+            owner_type,
+            tags: self.tags,
         }
     }
 }
@@ -93,6 +120,10 @@ pub struct DataVersion {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DataListResponse {
+    #[serde(default)]
+    pub model_id: String,
+    #[serde(default)]
+    pub model_name: String,
     #[serde(default)]
     pub groups: Vec<DataGroup>,
 }

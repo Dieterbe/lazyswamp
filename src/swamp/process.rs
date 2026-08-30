@@ -16,6 +16,8 @@ use super::{
 };
 use crate::error::{Error, Result};
 
+const ALL_DATA_SELECT: &str = r#"{"id": id, "name": name, "version": version, "createdAt": createdAt, "modelName": modelName, "modelId": modelId, "dataType": dataType, "contentType": contentType, "lifetime": lifetime, "ownerType": ownerType, "streaming": streaming, "size": size, "tags": tags}"#;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RunEvent {
     Log(String),
@@ -40,6 +42,7 @@ impl SwampCli {
     fn command(&self) -> Command {
         let mut command = Command::new(&self.binary);
         command.arg("--no-color");
+        command.kill_on_drop(true);
         command
     }
 
@@ -235,6 +238,27 @@ impl SwampClient for SwampCli {
         .map(|_| ())
     }
 
+    async fn all_data(&self) -> Result<Vec<DataArtifact>> {
+        let value = self
+            .json(
+                &["data", "query", "isLatest", "--select", ALL_DATA_SELECT],
+                "all data metadata",
+            )
+            .await?;
+        let response: QueryResponse =
+            serde_json::from_value(value).map_err(|source| Error::Json {
+                context: "all data metadata",
+                source,
+            })?;
+        let mut artifacts: Vec<DataArtifact> = response
+            .results
+            .into_iter()
+            .map(DataContent::into_artifact)
+            .collect();
+        artifacts.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+        Ok(artifacts)
+    }
+
     async fn data(&self, model: &str) -> Result<Vec<DataArtifact>> {
         let value = self.json(&["data", "list", model], "data list").await?;
         let response: DataListResponse =
@@ -245,6 +269,12 @@ impl SwampClient for SwampCli {
         let mut artifacts = Vec::new();
         for group in response.groups {
             for mut artifact in group.items {
+                if artifact.model_id.is_empty() {
+                    artifact.model_id.clone_from(&response.model_id);
+                }
+                if artifact.model_name.is_empty() {
+                    artifact.model_name.clone_from(&response.model_name);
+                }
                 if artifact.data_type.is_empty() {
                     artifact.data_type.clone_from(&group.data_type);
                 }

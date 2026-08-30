@@ -19,9 +19,8 @@ async fn main() -> anyhow::Result<()> {
         config.repo_dir.clone(),
     ));
     let mut app = App::new(config, client);
-    app.load().await;
-
     let mut terminal = TerminalSession::new().context("could not initialize the terminal")?;
+    app.begin_load();
     while !app.should_quit {
         terminal.terminal.draw(|frame| ui::render(frame, &app))?;
         if event::poll(Duration::from_millis(50))?

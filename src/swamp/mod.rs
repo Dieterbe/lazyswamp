@@ -26,6 +26,7 @@ pub trait SwampClient: Send + Sync {
         input: &Value,
     ) -> Result<mpsc::UnboundedReceiver<RunEvent>>;
     async fn cancel_method(&self, model: &str) -> Result<()>;
+    async fn all_data(&self) -> Result<Vec<DataArtifact>>;
     async fn data(&self, model: &str) -> Result<Vec<DataArtifact>>;
     async fn latest_data(&self, model: &str, name: &str) -> Result<DataContent>;
     async fn data_versions(&self, model: &str, name: &str) -> Result<Vec<DataVersion>>;
