@@ -46,7 +46,6 @@ enum PreloadRequest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
     Overview,
-    Methods,
     Data,
     Workflows,
 }
@@ -380,9 +379,8 @@ impl App {
                 self.mode = InputMode::Search;
             }
             KeyCode::Char('1') => self.activate_tab(Tab::Overview),
-            KeyCode::Char('2') => self.activate_tab(Tab::Methods),
-            KeyCode::Char('3') => self.activate_tab(Tab::Data),
-            KeyCode::Char('4') => self.activate_tab(Tab::Workflows),
+            KeyCode::Char('2') => self.activate_tab(Tab::Data),
+            KeyCode::Char('3') => self.activate_tab(Tab::Workflows),
             KeyCode::Tab | KeyCode::BackTab => {
                 self.focus = match self.focus {
                     Focus::Models => Focus::Content,
@@ -565,11 +563,6 @@ impl App {
         self.tab = tab;
         match tab {
             Tab::Overview => {
-                abort_named_task(&mut self.type_task);
-                abort_named_task(&mut self.data_task);
-                self.schedule_model(false);
-            }
-            Tab::Methods => {
                 abort_named_task(&mut self.data_task);
                 self.schedule_model(false);
                 self.schedule_type(false);
@@ -609,10 +602,6 @@ impl App {
         self.schedule_model(false);
         match self.tab {
             Tab::Overview => {
-                abort_named_task(&mut self.type_task);
-                abort_named_task(&mut self.data_task);
-            }
-            Tab::Methods => {
                 abort_named_task(&mut self.data_task);
                 self.schedule_type(false);
             }
@@ -1092,7 +1081,7 @@ impl App {
                     }
                     // Type descriptions only enrich output schemas; model details already
                     // contain the methods needed for browsing and execution. Missing extension
-                    // types stay silent here, and opening Methods can retry them explicitly.
+                    // types stay silent here, and opening Overview can retry them explicitly.
                 }
                 PreloadEvent::Workflow(name, result) => {
                     self.preloading_workflows.remove(&name);
@@ -1187,8 +1176,7 @@ impl App {
 
     fn refresh_current(&mut self) {
         match self.tab {
-            Tab::Overview => self.schedule_model(true),
-            Tab::Methods => {
+            Tab::Overview => {
                 self.schedule_model(true);
                 self.schedule_type(true);
             }
@@ -1219,8 +1207,7 @@ impl App {
             return;
         }
         match self.tab {
-            Tab::Overview => {}
-            Tab::Methods => {
+            Tab::Overview => {
                 let length = self
                     .type_description
                     .as_ref()
@@ -1250,8 +1237,7 @@ impl App {
             return;
         }
         match self.tab {
-            Tab::Overview => {}
-            Tab::Methods => {
+            Tab::Overview => {
                 if self.run_receiver.is_some() {
                     self.error = Some("Only one method can run at a time".to_owned());
                     return;
@@ -1611,7 +1597,7 @@ mod tests {
         assert_eq!(app.artifacts.len(), 1);
 
         app.focus = Focus::Content;
-        app.tab = Tab::Methods;
+        app.tab = Tab::Overview;
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .await;
         let FormMode::Fields(fields) = &mut app.form.as_mut().unwrap().mode else {

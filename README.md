@@ -7,7 +7,7 @@ inspect versioned data and workflow dependency graphs.
 ## Features
 
 - Search models and inspect their definitions, types, methods, arguments, and
-  output specifications.
+  output specifications from the combined Overview screen.
 - Validate, review, run, monitor, and cancel model methods. Every run requires
   review; destructive-looking methods also require the model name.
 - Browse artifact metadata and content, select historical versions, and compare
@@ -49,7 +49,7 @@ lazyswamp --repo-dir /path/to/repo --swamp-bin /path/to/swamp
 | --- | --- |
 | Arrow keys or `j`/`k` | Move the active selection |
 | `Tab` | Switch between list and content focus |
-| `1`, `2`, `3`, `4` | Open Overview, Methods, Data, or Workflows |
+| `1`, `2`, `3` | Open Overview, Data, or Workflows |
 | `Enter` | Open, load, validate, or confirm |
 | `/` | Filter the current model or workflow list |
 | `r` | Refresh the current view |
@@ -60,10 +60,18 @@ lazyswamp --repo-dir /path/to/repo --swamp-bin /path/to/swamp
 | `Esc` | Close a dialog |
 | `q` | Quit |
 
-Method inputs support common JSON Schema types and constraints. Schemas using
-references, composition, or conditionals fall back to a raw JSON editor. Fields
+Method inputs support common JSON Schema types and constraints. The Overview
+screen formats names, types, defaults, maxima, required markers, and descriptions
+as readable rows; nested fields are indented. Schemas using references,
+composition, or conditionals show a concise complex-schema fallback in the
+details view but still use the raw JSON editor when running the method. Fields
 marked `writeOnly` or `format: password` are masked and redacted from the review
 screen. Inputs are held only in memory and sent to Swamp as JSON over stdin.
+
+Methods live in Overview alongside the selected model's identity and global
+arguments, because that keeps the executable surface visible without an extra
+navigation step. Data and Workflows remain separate because they have different
+browsing and visualization interactions.
 
 Content larger than 1 MiB requires confirmation before loading. Binary content
 shows metadata but is not rendered or compared.

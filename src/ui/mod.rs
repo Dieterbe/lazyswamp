@@ -38,12 +38,11 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
 }
 
 fn render_header(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    let tabs = Tabs::new(vec!["1 Overview", "2 Methods", "3 Data", "4 Workflows"])
+    let tabs = Tabs::new(vec!["1 Overview", "2 Data", "3 Workflows"])
         .select(match app.tab {
             Tab::Overview => 0,
-            Tab::Methods => 1,
-            Tab::Data => 2,
-            Tab::Workflows => 3,
+            Tab::Data => 1,
+            Tab::Workflows => 2,
         })
         .highlight_style(Style::default().fg(ACCENT).add_modifier(Modifier::BOLD))
         .divider(" │ ")
@@ -162,7 +161,6 @@ fn render_workflow_list(frame: &mut Frame<'_>, app: &App, area: Rect) {
 fn render_content(frame: &mut Frame<'_>, app: &App, area: Rect) {
     match app.tab {
         Tab::Overview => render_overview(frame, app, area),
-        Tab::Methods => render_methods(frame, app, area),
         Tab::Data => render_data(frame, app, area),
         Tab::Workflows => render_workflows(frame, app, area),
     }
@@ -545,80 +543,109 @@ fn put_route(grid: &mut [Vec<char>], x: usize, y: usize, character: char) {
 }
 
 fn render_overview(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    let text = if let Some(detail) = &app.detail {
-        let tags = serde_json::to_string_pretty(&detail.tags).unwrap_or_default();
-        let arguments = serde_json::to_string_pretty(&detail.global_arguments).unwrap_or_default();
-        format!(
-            "Name:         {}\nID:           {}\nType:         {}\nType version: {}\nDefinition:   v{}\n\nTags\n{}\n\nGlobal arguments\n{}",
-            detail.name,
-            detail.id,
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(43), Constraint::Percentage(57)])
+        .split(area);
+    render_model_summary(frame, app, chunks[0]);
+    render_method_panel(frame, app, chunks[1]);
+}
+
+fn render_model_summary(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let Some(detail) = &app.detail else {
+        frame.render_widget(
+            panel(
+                " Overview ",
+                app,
+                Paragraph::new("Select a model to inspect it.").wrap(Wrap { trim: false }),
+            ),
+            area,
+        );
+        return;
+    };
+    let mut lines = vec![
+        Line::from(format!("Name: {}   ID: {}", detail.name, detail.id)),
+        Line::from(format!(
+            "Type: {}   Type version: {}   Definition: v{}",
             detail.model_type,
             detail.type_version.as_deref().unwrap_or("unknown"),
             detail
                 .version
-                .map_or_else(|| "?".to_owned(), |v| v.to_string()),
-            tags,
-            arguments
-        )
-    } else {
-        "Select a model to inspect it.".to_owned()
-    };
+                .map_or_else(|| "?".to_owned(), |version| version.to_string())
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Global arguments",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+    ];
+    lines.extend(format_global_arguments(&detail.global_arguments));
+    if lines.len() == 4 {
+        lines.push(Line::from(Span::styled(
+            "None",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
     frame.render_widget(
-        panel(
-            " Overview ",
-            app,
-            Paragraph::new(text).wrap(Wrap { trim: false }),
-        ),
+        Paragraph::new(lines)
+            .block(content_block(" Overview ", app))
+            .wrap(Wrap { trim: false }),
         area,
     );
 }
 
-fn render_methods(frame: &mut Frame<'_>, app: &App, area: Rect) {
+fn render_method_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(33), Constraint::Percentage(67)])
         .split(area);
     let methods = app
         .type_description
         .as_ref()
         .map(|description| description.methods.as_slice())
-        .unwrap_or_default();
+        .or_else(|| app.detail.as_ref().map(|detail| detail.methods.as_slice()))
+        .unwrap_or(&[]);
     let items: Vec<ListItem<'_>> = methods
         .iter()
         .map(|method| ListItem::new(method.name.as_str()))
         .collect();
     let list = List::new(items)
-        .block(content_block(" Methods ", app))
+        .block(content_block(" Methods · Enter to run ", app))
         .highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White))
         .highlight_symbol("› ");
     let mut state = ListState::default().with_selected(Some(app.method_index));
     frame.render_stateful_widget(list, chunks[0], &mut state);
 
     let detail = if !app.run_logs.is_empty() {
-        app.run_logs.join("\n")
+        Text::raw(app.run_logs.join("\n"))
     } else if let Some(method) = app.selected_method() {
-        let outputs = app
-            .type_description
-            .as_ref()
-            .and_then(|description| {
-                (!description.data_output_specs.is_empty()).then(|| {
-                    serde_json::to_string_pretty(&description.data_output_specs).unwrap_or_default()
-                })
-            })
-            .unwrap_or_else(|| "None declared".to_owned());
-        format!(
-            "{}\n\nArguments\n{}\n\nOutput specifications\n{}",
-            method.description,
-            serde_json::to_string_pretty(&method.arguments).unwrap_or_default(),
-            outputs
-        )
+        let mut lines = vec![Line::from(method.description.clone()), Line::from("")];
+        lines.push(Line::from(Span::styled(
+            "Arguments",
+            Style::default().add_modifier(Modifier::BOLD),
+        )));
+        lines.extend(format_schema_arguments(&method.arguments));
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Output specifications",
+            Style::default().add_modifier(Modifier::BOLD),
+        )));
+        if let Some(description) = app.type_description.as_ref() {
+            lines.extend(format_output_specifications(&description.data_output_specs));
+        } else {
+            lines.push(Line::from(Span::styled(
+                "  None declared",
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+        Text::from(lines)
     } else {
-        "This model exposes no methods.".to_owned()
+        Text::raw("This model exposes no methods.")
     };
     let title = if app.run_receiver.is_some() {
         " Run log (c to cancel) "
     } else {
-        " Method details (Enter to run) "
+        " Method details "
     };
     frame.render_widget(
         Paragraph::new(detail)
@@ -626,6 +653,282 @@ fn render_methods(frame: &mut Frame<'_>, app: &App, area: Rect) {
             .wrap(Wrap { trim: false }),
         chunks[1],
     );
+}
+
+fn format_output_specifications(specs: &[serde_json::Value]) -> Vec<Line<'static>> {
+    if specs.is_empty() {
+        return vec![Line::from(Span::styled(
+            "  None declared",
+            Style::default().fg(Color::DarkGray),
+        ))];
+    }
+
+    let mut lines = Vec::new();
+    for (index, spec) in specs.iter().enumerate() {
+        if index > 0 {
+            lines.push(Line::from(""));
+        }
+        let object = spec.as_object();
+        let label = object
+            .and_then(|value| {
+                value
+                    .get("specName")
+                    .or_else(|| value.get("name"))
+                    .or_else(|| value.get("id"))
+            })
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("Output {}", index + 1));
+        lines.push(Line::from(Span::styled(
+            format!("  {label}"),
+            Style::default().add_modifier(Modifier::BOLD),
+        )));
+
+        if let Some(description) = object
+            .and_then(|value| value.get("description"))
+            .and_then(serde_json::Value::as_str)
+            .filter(|description| !description.is_empty())
+        {
+            lines.push(Line::from(Span::styled(
+                format!("    {description}"),
+                Style::default().add_modifier(Modifier::ITALIC),
+            )));
+        }
+
+        let metadata = [
+            ("kind", object.and_then(|value| value.get("kind"))),
+            ("lifetime", object.and_then(|value| value.get("lifetime"))),
+            (
+                "garbage collection",
+                object.and_then(|value| value.get("garbageCollection")),
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(name, value)| value.map(|value| format!("{name}: {}", compact_value(value))))
+        .collect::<Vec<_>>();
+        if !metadata.is_empty() {
+            lines.push(Line::from(Span::styled(
+                format!("    {}", metadata.join(" · ")),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+
+        if let Some(schema) = object.and_then(|value| value.get("schema")) {
+            lines.push(Line::from(Span::styled(
+                "    Schema",
+                Style::default().add_modifier(Modifier::BOLD),
+            )));
+            if schema.is_object() {
+                lines.extend(format_schema_arguments(schema));
+            } else {
+                lines.push(Line::from(Span::styled(
+                    format!("      {}", compact_value(schema)),
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
+        }
+    }
+    lines
+}
+
+fn format_schema_arguments(schema: &serde_json::Value) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    if schema
+        .get("properties")
+        .and_then(serde_json::Value::as_object)
+        .is_none()
+        || has_complex_schema(schema)
+    {
+        lines.push(Line::from(Span::styled(
+            "  JSON value (complex schema)",
+            Style::default().fg(Color::DarkGray),
+        )));
+        return lines;
+    }
+    let required = schema
+        .get("required")
+        .and_then(serde_json::Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .collect::<std::collections::HashSet<_>>()
+        })
+        .unwrap_or_default();
+    let Some(properties) = schema
+        .get("properties")
+        .and_then(serde_json::Value::as_object)
+    else {
+        lines.push(Line::from(Span::styled(
+            "  None",
+            Style::default().fg(Color::DarkGray),
+        )));
+        return lines;
+    };
+    for (name, property) in properties {
+        format_schema_property(
+            &mut lines,
+            name,
+            property,
+            required.contains(name.as_str()),
+            0,
+        );
+    }
+    if lines.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  None",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    lines
+}
+
+fn format_schema_property(
+    lines: &mut Vec<Line<'static>>,
+    name: &str,
+    property: &serde_json::Value,
+    required: bool,
+    depth: usize,
+) {
+    if has_complex_schema(property) {
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{}{}", "  ".repeat(depth + 1), name),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" <JSON value>"),
+        ]));
+        return;
+    }
+    let kind = property
+        .get("enum")
+        .map(|_| "enum".to_owned())
+        .or_else(|| {
+            property
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| "any".to_owned());
+    let mut metadata = Vec::new();
+    if required {
+        metadata.push("required".to_owned());
+    }
+    if let Some(default) = property.get("default") {
+        metadata.push(format!("default: {}", compact_value(default)));
+    }
+    for key in ["maximum", "maxLength", "maxItems"] {
+        if let Some(maximum) = property.get(key) {
+            metadata.push(format!("max: {}", compact_value(maximum)));
+            break;
+        }
+    }
+    let suffix = if metadata.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", metadata.join(", "))
+    };
+    lines.push(Line::from(vec![
+        Span::styled(
+            format!("{}{}", "  ".repeat(depth + 1), name),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(format!(" <{kind}>{suffix}")),
+    ]));
+    if let Some(description) = property
+        .get("description")
+        .and_then(serde_json::Value::as_str)
+        .filter(|description| !description.is_empty())
+    {
+        lines.push(Line::from(Span::styled(
+            format!("{}{}", "  ".repeat(depth + 2), description),
+            Style::default().add_modifier(Modifier::ITALIC),
+        )));
+    }
+    if let Some(properties) = property
+        .get("properties")
+        .and_then(serde_json::Value::as_object)
+    {
+        let nested_required = property
+            .get("required")
+            .and_then(serde_json::Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .collect::<std::collections::HashSet<_>>()
+            })
+            .unwrap_or_default();
+        for (child_name, child) in properties {
+            format_schema_property(
+                lines,
+                child_name,
+                child,
+                nested_required.contains(child_name.as_str()),
+                depth + 1,
+            );
+        }
+    }
+}
+
+fn format_global_arguments(value: &serde_json::Value) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    let Some(object) = value.as_object() else {
+        lines.push(Line::from(Span::styled(
+            format!("  {}", compact_value(value)),
+            Style::default().fg(Color::DarkGray),
+        )));
+        return lines;
+    };
+    for (name, value) in object {
+        let display = if is_secret_name(name)
+            && !(value.as_str().is_some_and(|text| text.starts_with("${{")))
+        {
+            "••••••••".to_owned()
+        } else {
+            compact_value(value)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("  {name}"),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(format!(" <{}> = {display}", value_kind(value))),
+        ]));
+    }
+    lines
+}
+
+fn value_kind(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "boolean",
+        serde_json::Value::Number(number) if number.is_i64() || number.is_u64() => "integer",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    }
+}
+
+fn compact_value(value: &serde_json::Value) -> String {
+    value
+        .as_str()
+        .map(str::to_owned)
+        .unwrap_or_else(|| serde_json::to_string(value).unwrap_or_default())
+}
+
+fn is_secret_name(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    ["secret", "token", "password", "apikey", "api_key"]
+        .iter()
+        .any(|part| name.contains(part))
+}
+
+fn has_complex_schema(value: &serde_json::Value) -> bool {
+    ["$ref", "oneOf", "anyOf", "allOf", "if", "then", "else"]
+        .iter()
+        .any(|key| value.get(*key).is_some())
 }
 
 fn render_data(frame: &mut Frame<'_>, app: &App, area: Rect) {
@@ -831,7 +1134,7 @@ fn render_modal(frame: &mut Frame<'_>, app: &App) {
             70,
             70,
             " Help ",
-            "Arrows or j/k  Move selection\nTab              Switch list/content focus\n1/2/3/4          Overview/Methods/Data/Workflows\nEnter            Open, load, or run\n/                Filter current list\nr                Refresh\n[ / ]            Select data version\na / b            Mark comparison versions\nc                Cancel active run\nEsc              Close dialog\nq                Quit\n?                Close help",
+            "Arrows or j/k  Move selection\nTab              Switch list/content focus\n1/2/3            Overview/Data/Workflows\nEnter            Open, load, or run\n/                Filter current list\nr                Refresh\n[ / ]            Select data version\na / b            Mark comparison versions\nc                Cancel active run\nEsc              Close dialog\nq                Quit\n?                Close help",
         ),
     }
 }
@@ -947,7 +1250,7 @@ mod tests {
     use ratatui::{Terminal, backend::TestBackend};
 
     use crate::{
-        app::App,
+        app::{App, Focus, Tab},
         config::{Config, DEFAULT_PREVIEW_LIMIT},
         swamp::SwampCli,
     };
@@ -1021,5 +1324,94 @@ mod tests {
         assert!(rendered.contains('▶'));
         assert!(rendered.contains('─'));
         assert!(rendered.contains('│') || rendered.contains('┼'));
+    }
+
+    #[test]
+    fn formats_method_arguments_as_readable_rows() {
+        let config = Config {
+            repo_dir: PathBuf::from("/repo"),
+            swamp_bin: PathBuf::from("swamp"),
+            preview_limit: DEFAULT_PREVIEW_LIMIT,
+        };
+        let client = Arc::new(SwampCli::new(
+            config.swamp_bin.clone(),
+            config.repo_dir.clone(),
+        ));
+        let mut app = App::new(config, client);
+        app.detail = Some(crate::swamp::ModelDetails {
+            id: "model-id".to_owned(),
+            name: "hello-world".to_owned(),
+            model_type: "command/shell".to_owned(),
+            version: Some(1),
+            type_version: Some("1".to_owned()),
+            tags: serde_json::json!({}),
+            global_arguments: serde_json::json!({"apiKey": "secret-value"}),
+            methods: vec![crate::swamp::MethodSpec {
+                name: "execute".to_owned(),
+                description: "Run a command".to_owned(),
+                arguments: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "command": {
+                            "type": "string",
+                            "description": "Command to run",
+                            "maxLength": 100
+                        }
+                    },
+                    "required": ["command"]
+                }),
+            }],
+        });
+        app.tab = Tab::Overview;
+        app.focus = Focus::Content;
+
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| super::render(frame, &app)).unwrap();
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(rendered.contains("command"));
+        assert!(rendered.contains("required"));
+        assert!(rendered.contains("max: 100"));
+        assert!(rendered.contains("Command to run"));
+        assert!(!rendered.contains("\"properties\""));
+        assert!(rendered.contains("••••••••"));
+    }
+
+    #[test]
+    fn formats_output_specifications_without_raw_schema_dump() {
+        let specs = vec![serde_json::json!({
+            "specName": "clustering-summary",
+            "description": "Recurring-place clustering summary",
+            "kind": "resource",
+            "lifetime": "infinite",
+            "garbageCollection": 20,
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "clusterCount": {"type": "integer", "description": "Number of clusters"}
+                },
+                "required": ["clusterCount"]
+            }
+        })];
+        let rendered: String = super::format_output_specifications(&specs)
+            .into_iter()
+            .flat_map(|line| line.spans)
+            .map(|span| span.content.into_owned())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered.contains("Recurring-place clustering summary"));
+        assert!(rendered.contains("clustering-summary"));
+        assert!(!rendered.contains("Output 1"));
+        assert!(rendered.contains("kind: resource"));
+        assert!(rendered.contains("garbage collection: 20"));
+        assert!(rendered.contains("clusterCount"));
+        assert!(rendered.contains("Number of clusters"));
+        assert!(!rendered.contains("properties"));
     }
 }
