@@ -54,6 +54,7 @@ pub enum Tab {
 pub enum Focus {
     Models,
     Content,
+    Outputs,
 }
 
 #[derive(Debug, Clone)]
@@ -96,6 +97,8 @@ pub struct App {
     pub detail: Option<ModelDetails>,
     pub type_description: Option<TypeDescription>,
     pub method_index: usize,
+    pub output_index: usize,
+    pub expanded_output: Option<usize>,
     pub artifacts: Vec<DataArtifact>,
     pub artifact_index: usize,
     pub content: Option<DataContent>,
@@ -152,6 +155,8 @@ impl App {
             detail: None,
             type_description: None,
             method_index: 0,
+            output_index: 0,
+            expanded_output: None,
             artifacts: Vec::new(),
             artifact_index: 0,
             content: None,
@@ -374,7 +379,7 @@ impl App {
         match key.code {
             KeyCode::Char('q') => self.should_quit = true,
             KeyCode::Char('?') => self.mode = InputMode::Help,
-            KeyCode::Char('/') => {
+            KeyCode::Char('/') if self.focus == Focus::Models => {
                 self.search.clear();
                 self.mode = InputMode::Search;
             }
@@ -384,7 +389,9 @@ impl App {
             KeyCode::Tab | KeyCode::BackTab => {
                 self.focus = match self.focus {
                     Focus::Models => Focus::Content,
+                    Focus::Content if self.tab == Tab::Overview => Focus::Outputs,
                     Focus::Content => Focus::Models,
+                    Focus::Outputs => Focus::Models,
                 }
             }
             KeyCode::Char('r') => {
@@ -402,6 +409,15 @@ impl App {
             KeyCode::Down | KeyCode::Char('j') => self.move_selection(1).await,
             KeyCode::Enter => self.open_selected().await,
             KeyCode::Char('c') if self.run_receiver.is_some() => self.cancel_run().await,
+            KeyCode::Char(' ') if self.tab == Tab::Overview && self.focus == Focus::Outputs => {
+                self.toggle_output()
+            }
+            KeyCode::Char('[') if self.tab == Tab::Overview && self.focus == Focus::Outputs => {
+                self.move_output(-1)
+            }
+            KeyCode::Char(']') if self.tab == Tab::Overview && self.focus == Focus::Outputs => {
+                self.move_output(1)
+            }
             KeyCode::Char('[') if self.tab == Tab::Data => self.move_version(-1),
             KeyCode::Char(']') if self.tab == Tab::Data => self.move_version(1),
             KeyCode::Char('a') if self.tab == Tab::Data => {
@@ -561,6 +577,9 @@ impl App {
 
     fn activate_tab(&mut self, tab: Tab) {
         self.tab = tab;
+        if tab != Tab::Overview && self.focus == Focus::Outputs {
+            self.focus = Focus::Content;
+        }
         match tab {
             Tab::Overview => {
                 abort_named_task(&mut self.data_task);
@@ -582,6 +601,8 @@ impl App {
 
     fn selection_changed(&mut self) {
         self.method_index = 0;
+        self.output_index = 0;
+        self.expanded_output = None;
         self.artifact_index = 0;
         self.clear_data_view();
 
@@ -1152,6 +1173,8 @@ impl App {
             Err(error) => self.fail(error.to_string()),
         }
         self.method_index = 0;
+        self.output_index = 0;
+        self.expanded_output = None;
         self.artifact_index = 0;
         self.clear_data_view();
         if self.error.is_none() {
@@ -1208,13 +1231,22 @@ impl App {
         }
         match self.tab {
             Tab::Overview => {
+                if self.focus == Focus::Outputs {
+                    self.move_output(direction);
+                    return;
+                }
                 let length = self
                     .type_description
                     .as_ref()
                     .map(|description| description.methods.len())
                     .or_else(|| self.detail.as_ref().map(|detail| detail.methods.len()))
                     .unwrap_or(0);
+                let previous = self.method_index;
                 self.method_index = move_index(self.method_index, length, direction);
+                if previous != self.method_index {
+                    self.output_index = 0;
+                    self.expanded_output = None;
+                }
             }
             Tab::Data => {
                 self.artifact_index =
@@ -1231,6 +1263,27 @@ impl App {
         }
     }
 
+    fn move_output(&mut self, direction: isize) {
+        let length = self
+            .type_description
+            .as_ref()
+            .map(|description| description.data_output_specs.len())
+            .unwrap_or(0);
+        self.output_index = move_index(self.output_index, length, direction);
+    }
+
+    fn toggle_output(&mut self) {
+        let has_output = self
+            .type_description
+            .as_ref()
+            .is_some_and(|description| self.output_index < description.data_output_specs.len());
+        if !has_output {
+            return;
+        }
+        self.expanded_output =
+            (self.expanded_output != Some(self.output_index)).then_some(self.output_index);
+    }
+
     async fn open_selected(&mut self) {
         if self.focus == Focus::Models {
             self.focus = Focus::Content;
@@ -1238,6 +1291,9 @@ impl App {
         }
         match self.tab {
             Tab::Overview => {
+                if self.focus == Focus::Outputs {
+                    return;
+                }
                 if self.run_receiver.is_some() {
                     self.error = Some("Only one method can run at a time".to_owned());
                     return;
@@ -1611,6 +1667,21 @@ mod tests {
             .await;
         app.tick().await;
         assert!(calls.lock().unwrap().contains(&"run".to_owned()));
+
+        app.type_description.as_mut().unwrap().data_output_specs =
+            vec![json!({"specName": "first"}), json!({"specName": "second"})];
+        app.output_index = 0;
+        app.expanded_output = None;
+        app.focus = Focus::Outputs;
+        app.handle_key(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::NONE))
+            .await;
+        assert_eq!(app.output_index, 1);
+        app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
+            .await;
+        assert_eq!(app.expanded_output, Some(1));
+        app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
+            .await;
+        assert_eq!(app.expanded_output, None);
 
         app.tab = Tab::Data;
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))

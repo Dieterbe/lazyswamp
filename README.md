@@ -48,12 +48,13 @@ lazyswamp --repo-dir /path/to/repo --swamp-bin /path/to/swamp
 | Key | Action |
 | --- | --- |
 | Arrow keys or `j`/`k` | Move the active selection |
-| `Tab` | Switch between list and content focus |
+| `Tab` | Cycle model, method, and output focus in Overview |
 | `1`, `2`, `3` | Open Overview, Data, or Workflows |
 | `Enter` | Open, load, validate, or confirm |
 | `/` | Filter the current model or workflow list |
 | `r` | Refresh the current view |
-| `[` / `]` | Select a data version |
+| `[` / `]` | Select a data version, or an Overview output |
+| `Space` | Expand or collapse the selected Overview output schema |
 | `a` / `b` | Mark the two versions to compare |
 | `c` | Cancel the active method run |
 | `?` | Open contextual help |

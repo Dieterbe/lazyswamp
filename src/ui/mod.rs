@@ -631,7 +631,11 @@ fn render_method_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
             Style::default().add_modifier(Modifier::BOLD),
         )));
         if let Some(description) = app.type_description.as_ref() {
-            lines.extend(format_output_specifications(&description.data_output_specs));
+            lines.extend(format_output_specifications(
+                &description.data_output_specs,
+                app.output_index,
+                app.expanded_output,
+            ));
         } else {
             lines.push(Line::from(Span::styled(
                 "  None declared",
@@ -649,13 +653,26 @@ fn render_method_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
     };
     frame.render_widget(
         Paragraph::new(detail)
-            .block(Block::default().title(title).borders(Borders::ALL))
+            .block(
+                Block::default()
+                    .title(title)
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(if app.focus == Focus::Outputs {
+                        Color::Yellow
+                    } else {
+                        Color::DarkGray
+                    })),
+            )
             .wrap(Wrap { trim: false }),
         chunks[1],
     );
 }
 
-fn format_output_specifications(specs: &[serde_json::Value]) -> Vec<Line<'static>> {
+fn format_output_specifications(
+    specs: &[serde_json::Value],
+    selected: usize,
+    expanded: Option<usize>,
+) -> Vec<Line<'static>> {
     if specs.is_empty() {
         return vec![Line::from(Span::styled(
             "  None declared",
@@ -679,9 +696,16 @@ fn format_output_specifications(specs: &[serde_json::Value]) -> Vec<Line<'static
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned)
             .unwrap_or_else(|| format!("Output {}", index + 1));
+        let is_selected = index == selected;
+        let is_expanded = expanded == Some(index);
+        let marker = if is_expanded { "▾" } else { "▸" };
+        let mut header_style = Style::default().add_modifier(Modifier::BOLD);
+        if is_selected {
+            header_style = header_style.bg(Color::DarkGray).fg(Color::White);
+        }
         lines.push(Line::from(Span::styled(
-            format!("  {label}"),
-            Style::default().add_modifier(Modifier::BOLD),
+            format!("  {marker} {label}"),
+            header_style,
         )));
 
         if let Some(description) = object
@@ -713,19 +737,30 @@ fn format_output_specifications(specs: &[serde_json::Value]) -> Vec<Line<'static
             )));
         }
 
-        if let Some(schema) = object.and_then(|value| value.get("schema")) {
-            lines.push(Line::from(Span::styled(
-                "    Schema",
-                Style::default().add_modifier(Modifier::BOLD),
-            )));
-            if schema.is_object() {
-                lines.extend(format_schema_arguments(schema));
-            } else {
+        if is_expanded {
+            if let Some(schema) = object.and_then(|value| value.get("schema")) {
                 lines.push(Line::from(Span::styled(
-                    format!("      {}", compact_value(schema)),
-                    Style::default().fg(Color::DarkGray),
+                    "    Schema",
+                    Style::default().add_modifier(Modifier::BOLD),
                 )));
+                if schema.is_object() {
+                    lines.extend(format_schema_arguments(schema));
+                } else {
+                    lines.push(Line::from(Span::styled(
+                        format!("      {}", compact_value(schema)),
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                }
             }
+        } else if let Some(schema) = object.and_then(|value| value.get("schema")) {
+            let field_count = schema
+                .get("properties")
+                .and_then(serde_json::Value::as_object)
+                .map_or(0, serde_json::Map::len);
+            lines.push(Line::from(Span::styled(
+                format!("    Schema: {field_count} fields · Space to expand"),
+                Style::default().fg(Color::DarkGray),
+            )));
         }
     }
     lines
@@ -1057,7 +1092,7 @@ fn render_data(frame: &mut Frame<'_>, app: &App, area: Rect) {
 fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let mut lines = vec![Line::from(vec![
         Span::styled(app.status.as_str(), Style::default().fg(ACCENT)),
-        Span::raw("  ·  / filter · Tab focus · r refresh · ? help · q quit"),
+        Span::raw("  ·  / filter models · Tab focus · r refresh · ? help · q quit"),
     ])];
     if let Some(error) = &app.error {
         lines.push(Line::from(Span::styled(
@@ -1134,7 +1169,7 @@ fn render_modal(frame: &mut Frame<'_>, app: &App) {
             70,
             70,
             " Help ",
-            "Arrows or j/k  Move selection\nTab              Switch list/content focus\n1/2/3            Overview/Data/Workflows\nEnter            Open, load, or run\n/                Filter current list\nr                Refresh\n[ / ]            Select data version\na / b            Mark comparison versions\nc                Cancel active run\nEsc              Close dialog\nq                Quit\n?                Close help",
+            "Arrows or j/k  Move selection\nTab              Cycle model/method/output focus\n1/2/3            Overview/Data/Workflows\nEnter            Open, load, or run\n/                Filter models\nr                Refresh\n[ / ]            Data versions or Overview outputs\nSpace            Expand/collapse selected output\na / b            Mark comparison versions\nc                Cancel active run\nEsc              Close dialog\nq                Quit\n?                Close help",
         ),
     }
 }
@@ -1399,7 +1434,7 @@ mod tests {
                 "required": ["clusterCount"]
             }
         })];
-        let rendered: String = super::format_output_specifications(&specs)
+        let rendered: String = super::format_output_specifications(&specs, 0, Some(0))
             .into_iter()
             .flat_map(|line| line.spans)
             .map(|span| span.content.into_owned())
