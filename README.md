@@ -3,6 +3,12 @@
 Lazyswamp is a terminal interface for [Swamp](https://swamp.club). It lets you
 browse managed models, run their methods through schema-derived forms, and
 inspect versioned data and workflow dependency graphs.
+It's inspired by [Lazygit](https://github.com/jesseduffield/lazygit).
+
+I built it because I found it too cumbersome to run the various swamp CLI commands
+to find a model, inspect it, to view its method parameters, to list its data, to view
+the data, etc, etc. The main goal of lazyswamp is simply to show everything
+in a single UI that is easy to navigate.
 
 ## Features
 
