@@ -616,8 +616,15 @@ fn render_method_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let mut state = ListState::default().with_selected(Some(app.method_index));
     frame.render_stateful_widget(list, chunks[0], &mut state);
 
-    let detail = if !app.run_logs.is_empty() {
-        Text::raw(app.run_logs.join("\n"))
+    let show_run_log = app.run_log_visible
+        && app.run_log_matches_selection()
+        && (!app.run_logs.is_empty() || app.run_receiver.is_some());
+    let detail = if show_run_log {
+        Text::raw(if app.run_logs.is_empty() {
+            "Running…".to_owned()
+        } else {
+            app.run_logs.join("\n")
+        })
     } else if let Some(method) = app.selected_method() {
         let mut lines = vec![Line::from(method.description.clone()), Line::from("")];
         lines.push(Line::from(Span::styled(
@@ -646,7 +653,7 @@ fn render_method_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
     } else {
         Text::raw("This model exposes no methods.")
     };
-    let title = if app.run_receiver.is_some() {
+    let title = if show_run_log && app.run_receiver.is_some() {
         " Run log (c to cancel) "
     } else {
         " Method details "
@@ -1169,7 +1176,7 @@ fn render_modal(frame: &mut Frame<'_>, app: &App) {
             70,
             70,
             " Help ",
-            "Arrows or j/k  Move selection\nTab              Cycle model/method/output focus\n1/2/3            Overview/Data/Workflows\nEnter            Open, load, or run\n/                Filter models\nr                Refresh\n[ / ]            Data versions or Overview outputs\nSpace            Expand/collapse selected output\na / b            Mark comparison versions\nc                Cancel active run\nEsc              Close dialog\nq                Quit\n?                Close help",
+            "Arrows or j/k  Move selection\nTab              Cycle model/method/output focus\n1/2/3            Overview/Data/Workflows\nEnter            Open, load, or run\n/                Filter models\nr                Refresh\n[ / ]            Data versions or Overview outputs\nSpace            Expand/collapse selected output\na / b            Mark comparison versions\nc                Cancel active run\nEsc              Close dialog or hide run log\nq                Quit\n?                Close help",
         ),
     }
 }

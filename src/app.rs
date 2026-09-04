@@ -118,6 +118,9 @@ pub struct App {
     pub run_logs: Vec<String>,
     pub run_receiver: Option<mpsc::UnboundedReceiver<RunEvent>>,
     pub running_model: Option<String>,
+    pub run_log_model: Option<String>,
+    pub run_log_method: Option<String>,
+    pub run_log_visible: bool,
     pub should_quit: bool,
     refresh_after_run: bool,
     model_cache: HashMap<String, ModelDetails>,
@@ -176,6 +179,9 @@ impl App {
             run_logs: Vec::new(),
             run_receiver: None,
             running_model: None,
+            run_log_model: None,
+            run_log_method: None,
+            run_log_visible: false,
             should_quit: false,
             refresh_after_run: false,
             model_cache: HashMap::new(),
@@ -311,6 +317,12 @@ impl App {
         self.artifacts.get(self.artifact_index)
     }
 
+    pub fn run_log_matches_selection(&self) -> bool {
+        self.run_log_model.as_deref() == self.selected_model().map(|model| model.name.as_str())
+            && self.run_log_method.as_deref()
+                == self.selected_method().map(|method| method.name.as_str())
+    }
+
     pub async fn handle_key(&mut self, key: KeyEvent) {
         self.error = None;
         match self.mode.clone() {
@@ -378,6 +390,9 @@ impl App {
         }
         match key.code {
             KeyCode::Char('q') => self.should_quit = true,
+            KeyCode::Esc if self.run_log_visible && self.run_log_matches_selection() => {
+                self.run_log_visible = false
+            }
             KeyCode::Char('?') => self.mode = InputMode::Help,
             KeyCode::Char('/') if self.focus == Focus::Models => {
                 self.search.clear();
@@ -1380,6 +1395,9 @@ impl App {
                 self.run_logs.clear();
                 self.run_receiver = Some(receiver);
                 self.running_model = Some(model);
+                self.run_log_model = self.running_model.clone();
+                self.run_log_method = Some(method.clone());
+                self.run_log_visible = true;
                 self.form = None;
                 self.mode = InputMode::Normal;
                 self.status = format!("Running {method}…");
@@ -1667,6 +1685,28 @@ mod tests {
             .await;
         app.tick().await;
         assert!(calls.lock().unwrap().contains(&"run".to_owned()));
+        assert!(app.run_log_matches_selection());
+        assert!(app.run_log_visible);
+        app.run_logs.push("finished".to_owned());
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .await;
+        assert!(!app.run_log_visible);
+        app.type_description
+            .as_mut()
+            .unwrap()
+            .methods
+            .push(MethodSpec {
+                name: "other".to_owned(),
+                description: String::new(),
+                arguments: json!({}),
+            });
+        app.method_index = 1;
+        assert!(!app.run_log_matches_selection());
+        app.run_log_visible = true;
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .await;
+        assert!(app.run_log_visible);
+        app.method_index = 0;
 
         app.type_description.as_mut().unwrap().data_output_specs =
             vec![json!({"specName": "first"}), json!({"specName": "second"})];

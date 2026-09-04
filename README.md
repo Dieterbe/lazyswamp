@@ -1,23 +1,24 @@
 # Lazyswamp
 
-Lazyswamp is a terminal interface for [Swamp](https://swamp.club). It lets you
-browse managed models, run their methods through schema-derived forms, and
-inspect versioned data and workflow dependency graphs.
-It's inspired by [Lazygit](https://github.com/jesseduffield/lazygit).
+Lazyswamp is a terminal user interface for [Swamp](https://swamp.club), inspired
+by [Lazygit](https://github.com/jesseduffield/lazygit).
 
-I built it because I found it too cumbersome to run the various swamp CLI commands
-to find a model, inspect it, to view its method parameters, to list its data, to view
-the data, etc, etc. The main goal of lazyswamp is simply to show everything
-in a single UI that is easy to navigate.
+I built it because I found it too cumbersome to run the various swamp CLI
+commands to find a model, inspect it, to view its method parameters, to list its
+data, to view the data, etc, etc. The main goal of lazyswamp is simply to show
+everything I need in a single UI that is easy to navigate.
+
+Secondarily, you can also execute method runs with custom parameters from the
+TUI.
 
 ## Features
 
-- Search models and inspect their definitions, types, methods, arguments, and
-  output specifications from the combined Overview screen.
+- Browse & search models and inspect their definitions, types, methods,
+  arguments, and output specifications from the Overview screen.
 - Validate, review, run, monitor, and cancel model methods. Every run requires
   review; destructive-looking methods also require the model name.
-- Browse artifact metadata and content, select historical versions, and compare
-  JSON structurally or UTF-8 text line by line.
+- Browse artifact metadata and content, select historical versions, view data
+  and compare JSON structurally or UTF-8 text line by line.
 - Browse workflows as routed DAGs with arrows, select individual steps, and
   inspect their dependencies, conditions, task types, and inputs.
 
@@ -51,29 +52,30 @@ lazyswamp --repo-dir /path/to/repo --swamp-bin /path/to/swamp
 
 ## Navigation
 
-| Key | Action |
-| --- | --- |
-| Arrow keys or `j`/`k` | Move the active selection |
-| `Tab` | Cycle model, method, and output focus in Overview |
-| `1`, `2`, `3` | Open Overview, Data, or Workflows |
-| `Enter` | Open, load, validate, or confirm |
-| `/` | Filter the current model or workflow list |
-| `r` | Refresh the current view |
-| `[` / `]` | Select a data version, or an Overview output |
-| `Space` | Expand or collapse the selected Overview output schema |
-| `a` / `b` | Mark the two versions to compare |
-| `c` | Cancel the active method run |
-| `?` | Open contextual help |
-| `Esc` | Close a dialog |
-| `q` | Quit |
+| Key                   | Action                                                 |
+| --------------------- | ------------------------------------------------------ |
+| Arrow keys or `j`/`k` | Move the active selection                              |
+| `Tab`                 | Cycle model, method, and output focus in Overview      |
+| `1`, `2`, `3`         | Open Overview, Data, or Workflows                      |
+| `Enter`               | Open, load, validate, or confirm                       |
+| `/`                   | Filter the current model or workflow list              |
+| `r`                   | Refresh the current view                               |
+| `[` / `]`             | Select a data version, or an Overview output           |
+| `Space`               | Expand or collapse the selected Overview output schema |
+| `a` / `b`             | Mark the two versions to compare                       |
+| `c`                   | Cancel the active method run                           |
+| `?`                   | Open contextual help                                   |
+| `Esc`                 | Close a dialog or hide the active method run log       |
+| `q`                   | Quit                                                   |
 
 Method inputs support common JSON Schema types and constraints. The Overview
-screen formats names, types, defaults, maxima, required markers, and descriptions
-as readable rows; nested fields are indented. Schemas using references,
-composition, or conditionals show a concise complex-schema fallback in the
-details view but still use the raw JSON editor when running the method. Fields
-marked `writeOnly` or `format: password` are masked and redacted from the review
-screen. Inputs are held only in memory and sent to Swamp as JSON over stdin.
+screen formats names, types, defaults, maxima, required markers, and
+descriptions as readable rows; nested fields are indented. Schemas using
+references, composition, or conditionals show a concise complex-schema fallback
+in the details view but still use the raw JSON editor when running the method.
+Fields marked `writeOnly` or `format: password` are masked and redacted from the
+review screen. Inputs are held only in memory and sent to Swamp as JSON over
+stdin.
 
 Methods live in Overview alongside the selected model's identity and global
 arguments, because that keeps the executable surface visible without an extra
