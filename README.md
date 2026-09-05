@@ -11,6 +11,20 @@ everything I need in a single UI that is easy to navigate.
 Secondarily, you can also execute method runs with custom parameters from the
 TUI.
 
+## Screenshots
+
+### Models
+
+![Models screen](screenshots/lazyswamp-1-models.png)
+
+### Data
+
+![Data screen](screenshots/lazyswamp-2-data.png)
+
+### Workflows
+
+![Workflows screen](screenshots/lazyswamp-3-workflows.png)
+
 ## Features
 
 - Browse & search model definitions, and inspect their type interface, methods,
