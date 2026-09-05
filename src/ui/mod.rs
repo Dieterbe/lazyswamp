@@ -1048,23 +1048,87 @@ fn format_global_arguments(value: &serde_json::Value) -> Vec<Line<'static>> {
         )));
         return lines;
     };
-    for (name, value) in object {
-        let display = if is_secret_name(name)
-            && !(value.as_str().is_some_and(|text| text.starts_with("${{")))
-        {
-            "••••••••".to_owned()
+    let mut entries = object.iter().collect::<Vec<_>>();
+    entries.sort_by_key(|(name, _)| *name);
+    for (name, value) in entries {
+        if is_secret_name(name) && !(value.as_str().is_some_and(|text| text.starts_with("${{"))) {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("  {name}"),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(format!(" <{}> = ••••••••", value_kind(value))),
+            ]));
+            continue;
+        }
+
+        let decoded = value
+            .as_str()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
+            .filter(|decoded| decoded.is_array() || decoded.is_object());
+        let display = decoded.as_ref().unwrap_or(value);
+        let kind = if decoded.is_some() {
+            format!("JSON-encoded {}", value_kind(display))
         } else {
-            compact_value(value)
+            value_kind(display).to_owned()
         };
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!("  {name}"),
+        if display.is_array() || display.is_object() {
+            lines.push(Line::from(Span::styled(
+                format!("  {name} <{kind}>"),
                 Style::default().add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(format!(" <{}> = {display}", value_kind(value))),
-        ]));
+            )));
+            format_global_value_tree(&mut lines, display, 4, name);
+        } else {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("  {name}"),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(format!(" <{kind}> = {}", compact_value(display))),
+            ]));
+        }
     }
     lines
+}
+
+fn format_global_value_tree(
+    lines: &mut Vec<Line<'static>>,
+    value: &serde_json::Value,
+    indent: usize,
+    context: &str,
+) {
+    let padding = " ".repeat(indent);
+    match value {
+        serde_json::Value::Object(object) => {
+            let mut entries = object.iter().collect::<Vec<_>>();
+            entries.sort_by_key(|(name, _)| *name);
+            for (name, child) in entries {
+                lines.push(Line::from(vec![
+                    Span::raw(padding.clone()),
+                    Span::styled(
+                        name.to_owned(),
+                        Style::default().add_modifier(Modifier::BOLD),
+                    ),
+                ]));
+                format_global_value_tree(lines, child, indent + 2, name);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            let item_name = if context == "sources" {
+                "Source"
+            } else {
+                "Item"
+            };
+            for (index, child) in values.iter().enumerate() {
+                lines.push(Line::from(Span::styled(
+                    format!("{padding}{item_name} {}", index + 1),
+                    Style::default().add_modifier(Modifier::BOLD),
+                )));
+                format_global_value_tree(lines, child, indent + 2, context);
+            }
+        }
+        _ => lines.push(Line::from(format!("{padding}{}", compact_value(value)))),
+    }
 }
 
 fn value_kind(value: &serde_json::Value) -> &'static str {
@@ -1590,5 +1654,32 @@ mod tests {
         assert!(rendered.contains("clusterCount"));
         assert!(rendered.contains("Number of clusters"));
         assert!(!rendered.contains("properties"));
+    }
+
+    #[test]
+    fn formats_json_encoded_global_arguments_as_a_tree() {
+        let arguments = serde_json::json!({
+            "sources": r#"[{"sourceModelId":"${{ data.latest(\"takeout\", \"import-summary\") }}","chunkNames":["a","b"]}]"#,
+            "archiveDirectory": "data-input"
+        });
+        let rendered: String = super::format_global_arguments(&arguments)
+            .into_iter()
+            .map(|line| {
+                line.spans
+                    .into_iter()
+                    .map(|span| span.content.into_owned())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("sources <JSON-encoded array>"));
+        assert!(rendered.contains("Source 1"));
+        assert!(rendered.contains(
+            "sourceModelId\n        ${{ data.latest(\"takeout\", \"import-summary\") }}"
+        ));
+        assert!(rendered.contains("chunkNames\n"));
+        assert!(rendered.contains("archiveDirectory <string> = data-input"));
+        assert!(!rendered.contains("\\\\\"takeout\\\\\""));
     }
 }
