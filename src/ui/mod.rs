@@ -208,83 +208,183 @@ fn render_workflows(frame: &mut Frame<'_>, app: &App, area: Rect) {
 
     let details = app.selected_workflow_node().map_or_else(
         || "No workflow step selected.".to_owned(),
-        |node| {
-            let dependencies = if node.step.depends_on.is_empty() {
-                "None".to_owned()
-            } else {
-                node.step
-                    .depends_on
-                    .iter()
-                    .map(|dependency| {
-                        let condition = dependency
-                            .condition
-                            .get("type")
-                            .and_then(serde_json::Value::as_str)
-                            .unwrap_or("condition");
-                        format!("{} ({condition})", dependency.step)
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            };
-            let fields = node
-                .step
-                .task
-                .fields
-                .iter()
-                .filter(|(name, _)| name.as_str() != "inputs")
-                .map(|(name, value)| {
-                    let label = match name.as_str() {
-                        "modelIdOrName" => "Target",
-                        "modelType" => "Type",
-                        "modelName" => "Model",
-                        "methodName" => "Method",
-                        "workflowIdOrName" => "Workflow",
-                        "globalArgs" => "Global arguments",
-                        "prompt" => "Prompt",
-                        "timeout" => "Timeout",
-                        "expr" => "Expression",
-                        "message" => "Message",
-                        "severity" => "Severity",
-                        _ => name,
-                    };
-                    let value = value
-                        .as_str()
-                        .map(str::to_owned)
-                        .unwrap_or_else(|| serde_json::to_string(value).unwrap_or_default());
-                    format!("{label}: {value}")
-                })
-                .collect::<Vec<_>>()
-                .join(" · ");
-            let inputs = node
-                .step
-                .task
-                .fields
-                .get("inputs")
-                .map(|inputs| serde_json::to_string(inputs).unwrap_or_default())
-                .unwrap_or_else(|| "None".to_owned());
-            format!(
-                "Job: {} · Step: {}\nTask: {} · Layer: {}\n{}\nDepends on: {}\nInputs: {}\n{}",
-                node.job.name,
-                node.step.name,
-                node.step.task.task_type,
-                node.layer,
-                fields,
-                dependencies,
-                inputs,
-                node.step.description
-            )
-        },
+        |node| format_workflow_step_details(app, node),
+    );
+    let title = app.selected_workflow_node().map_or_else(
+        || " Selected step ".to_owned(),
+        |node| format!(" Step · {} ", node.step.name),
     );
     frame.render_widget(
         Paragraph::new(details)
-            .block(
-                Block::default()
-                    .title(" Selected step ")
-                    .borders(Borders::ALL),
-            )
+            .block(Block::default().title(title).borders(Borders::ALL))
             .wrap(Wrap { trim: false }),
         sections[2],
     );
+}
+
+fn format_workflow_step_details(app: &App, node: crate::swamp::WorkflowNode<'_>) -> String {
+    let task = &node.step.task;
+    let mut lines = Vec::new();
+    if !node.step.description.is_empty() {
+        lines.push(node.step.description.clone());
+        lines.push(String::new());
+    }
+
+    match task.task_type.as_str() {
+        "model_method" => {
+            let definition = task_field(task, "modelIdOrName").unwrap_or("?");
+            let method = task_field(task, "methodName").unwrap_or("?");
+            lines.push("Runs model method".to_owned());
+            lines.push(format!("{definition} → {method}()"));
+            lines.push(String::new());
+            lines.push(format!("Model definition: {definition}"));
+            if let Some(model_type) = task_field(task, "modelType").or_else(|| {
+                app.models
+                    .iter()
+                    .find(|model| model.name == definition || model.id == definition)
+                    .map(|model| model.model_type.as_str())
+            }) {
+                lines.push(format!("Type: {model_type}"));
+            }
+            lines.push(format!("Method: {method}"));
+        }
+        "workflow" => {
+            let workflow = task_field(task, "workflowIdOrName").unwrap_or("?");
+            lines.push("Calls workflow".to_owned());
+            lines.push(format!("workflow → {workflow}()"));
+            lines.push(String::new());
+            lines.push(format!("Workflow: {workflow}"));
+        }
+        "manual_approval" => {
+            lines.push("Requires manual approval".to_owned());
+            if let Some(prompt) = task_field(task, "prompt") {
+                lines.push(String::new());
+                lines.push(format!("Prompt: {prompt}"));
+            }
+        }
+        "assert" => {
+            lines.push("Assertion".to_owned());
+            for (field, label) in [
+                ("expr", "Expression"),
+                ("severity", "Severity"),
+                ("message", "Message"),
+            ] {
+                if let Some(value) = task_field(task, field) {
+                    lines.push(format!("{label}: {value}"));
+                }
+            }
+        }
+        _ => lines.push(format!("Task: {}", task.task_type)),
+    }
+
+    append_inputs(&mut lines, task.fields.get("inputs"));
+    append_additional_task_fields(&mut lines, task);
+    append_dependencies(&mut lines, node);
+    lines.push(String::new());
+    lines.push(format!(
+        "Context: job {} · DAG layer {}",
+        node.job.name, node.layer
+    ));
+    lines.join("\n")
+}
+
+fn task_field<'a>(task: &'a crate::swamp::WorkflowTask, name: &str) -> Option<&'a str> {
+    task.fields.get(name).and_then(serde_json::Value::as_str)
+}
+
+fn append_inputs(lines: &mut Vec<String>, inputs: Option<&serde_json::Value>) {
+    let Some(inputs) = inputs else {
+        return;
+    };
+    lines.push(String::new());
+    lines.push("Inputs".to_owned());
+    let Some(values) = inputs.as_object() else {
+        lines.push(format!("  {}", format_json_value(inputs)));
+        return;
+    };
+    if values.is_empty() {
+        lines.push("  None".to_owned());
+        return;
+    }
+    let mut entries = values.iter().collect::<Vec<_>>();
+    entries.sort_by_key(|(name, _)| *name);
+    for (name, value) in entries {
+        if value.is_object() || value.is_array() {
+            lines.push(format!("  {name} ="));
+            for value_line in serde_json::to_string_pretty(value)
+                .unwrap_or_default()
+                .lines()
+            {
+                lines.push(format!("    {value_line}"));
+            }
+        } else {
+            lines.push(format!("  {name} = {}", format_json_value(value)));
+        }
+    }
+}
+
+fn append_additional_task_fields(lines: &mut Vec<String>, task: &crate::swamp::WorkflowTask) {
+    let known = match task.task_type.as_str() {
+        "model_method" => ["modelIdOrName", "modelType", "methodName", "inputs"].as_slice(),
+        "workflow" => ["workflowIdOrName", "inputs"].as_slice(),
+        "manual_approval" => ["prompt", "inputs"].as_slice(),
+        "assert" => ["expr", "severity", "message", "inputs"].as_slice(),
+        _ => ["inputs"].as_slice(),
+    };
+    let mut fields = task
+        .fields
+        .iter()
+        .filter(|(name, _)| !known.contains(&name.as_str()))
+        .collect::<Vec<_>>();
+    if fields.is_empty() {
+        return;
+    }
+    fields.sort_by_key(|(name, _)| *name);
+    lines.push(String::new());
+    lines.push("Additional configuration".to_owned());
+    for (name, value) in fields {
+        lines.push(format!("  {name}: {}", format_json_value(value)));
+    }
+}
+
+fn append_dependencies(lines: &mut Vec<String>, node: crate::swamp::WorkflowNode<'_>) {
+    if !node.step.depends_on.is_empty() {
+        lines.push(String::new());
+        lines.push("Waits for".to_owned());
+        for dependency in &node.step.depends_on {
+            lines.push(format!(
+                "  {}  [{}]",
+                dependency.step,
+                dependency_condition(&dependency.condition)
+            ));
+        }
+    }
+    if !node.job.depends_on.is_empty() {
+        lines.push(String::new());
+        lines.push("Job also waits for".to_owned());
+        for dependency in &node.job.depends_on {
+            lines.push(format!(
+                "  {}  [{}]",
+                dependency.job,
+                dependency_condition(&dependency.condition)
+            ));
+        }
+    }
+}
+
+fn dependency_condition(condition: &serde_json::Value) -> String {
+    condition
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .unwrap_or_else(|| format_json_value(condition))
+}
+
+fn format_json_value(value: &serde_json::Value) -> String {
+    value
+        .as_str()
+        .map(str::to_owned)
+        .unwrap_or_else(|| serde_json::to_string(value).unwrap_or_default())
 }
 
 #[derive(Debug)]
@@ -1391,7 +1491,11 @@ mod tests {
         assert!(rendered.contains("Dependency graph"));
         assert!(rendered.contains("render-dashboard"));
         assert!(rendered.contains("collect-dieter"));
-        assert!(rendered.contains("Selected step"));
+        assert!(rendered.contains("Step · render-dashboard"));
+        assert!(rendered.contains("Runs model method"));
+        assert!(rendered.contains("weight-grafana → renderWeightDashboard()"));
+        assert!(rendered.contains("Model definition: weight-grafana"));
+        assert!(rendered.contains("Waits for"));
         assert!(rendered.contains('▶'));
         assert!(rendered.contains('─'));
         assert!(rendered.contains('│') || rendered.contains('┼'));
