@@ -1351,13 +1351,13 @@ impl App {
             Ok(receiver) => {
                 self.run_logs.clear();
                 self.run_receiver = Some(receiver);
-                self.running_model = Some(model);
+                self.running_model = Some(model.clone());
                 self.run_log_model = self.running_model.clone();
                 self.run_log_method = Some(method.clone());
                 self.run_log_visible = true;
                 self.form = None;
                 self.mode = InputMode::Normal;
-                self.status = format!("Running {method}…");
+                self.status = format!("Running {model}.{method}…");
             }
             Err(error) => self.fail(error.to_string()),
         }

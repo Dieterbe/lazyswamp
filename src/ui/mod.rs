@@ -38,7 +38,7 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
 }
 
 fn render_header(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    let tabs = Tabs::new(vec!["1 Overview", "2 Data", "3 Workflows"])
+    let tabs = Tabs::new(vec!["1 Models", "2 Data", "3 Workflows"])
         .select(match app.tab {
             Tab::Overview => 0,
             Tab::Data => 1,
@@ -84,9 +84,9 @@ fn render_models(frame: &mut Frame<'_>, app: &App, area: Rect) {
         Color::DarkGray
     };
     let title = if app.search.is_empty() {
-        " Models ".to_owned()
+        " Definitions ".to_owned()
     } else {
-        format!(" Models matching “{}” ", app.search)
+        format!(" Definitions matching “{}” ", app.search)
     };
     let list = List::new(items)
         .block(
@@ -557,7 +557,7 @@ fn render_model_summary(frame: &mut Frame<'_>, app: &App, area: Rect) {
     if detail.is_none() && model.is_none() {
         frame.render_widget(
             panel(
-                " Overview ",
+                " Definition details ",
                 app,
                 Paragraph::new("Select a model to inspect it.").wrap(Wrap { trim: false }),
             ),
@@ -611,7 +611,7 @@ fn render_model_summary(frame: &mut Frame<'_>, app: &App, area: Rect) {
     }
     frame.render_widget(
         Paragraph::new(lines)
-            .block(content_block(" Overview ", app))
+            .block(content_block(" Definition details ", app))
             .wrap(Wrap { trim: false }),
         area,
     );
@@ -634,7 +634,7 @@ fn render_method_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
         .map(|method| ListItem::new(method.name.as_str()))
         .collect();
     let list = List::new(items)
-        .block(content_block(" Methods · Enter to run ", app))
+        .block(content_block(" Type methods · Enter to run ", app))
         .highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White))
         .highlight_symbol("› ");
     let mut state = ListState::default().with_selected(Some(app.method_index));
@@ -658,7 +658,7 @@ fn render_method_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
         lines.extend(format_schema_arguments(&method.arguments));
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
-            "Output specifications",
+            "Type output specifications",
             Style::default().add_modifier(Modifier::BOLD),
         )));
         if let Some(description) = app.type_description.as_ref() {
@@ -675,12 +675,14 @@ fn render_method_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
         }
         Text::from(lines)
     } else {
-        Text::raw("This model exposes no methods.")
+        Text::raw("This type exposes no methods.")
     };
     let title = if show_run_log && app.run_receiver.is_some() {
-        " Run log (c to cancel) "
+        " Method run output (c to cancel) "
+    } else if show_run_log {
+        " Method run output "
     } else {
-        " Method details "
+        " Type interface "
     };
     frame.render_widget(
         Paragraph::new(detail)
@@ -1123,7 +1125,7 @@ fn render_data(frame: &mut Frame<'_>, app: &App, area: Rect) {
 fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let mut lines = vec![Line::from(vec![
         Span::styled(app.status.as_str(), Style::default().fg(ACCENT)),
-        Span::raw("  ·  / filter models · Tab focus · r refresh · ? help · q quit"),
+        Span::raw("  ·  / filter definitions · Tab focus · r refresh · ? help · q quit"),
     ])];
     if let Some(error) = &app.error {
         lines.push(Line::from(Span::styled(
@@ -1144,7 +1146,7 @@ fn render_modal(frame: &mut Frame<'_>, app: &App) {
             if app.tab == Tab::Workflows {
                 " Filter workflows "
             } else {
-                " Filter models "
+                " Filter definitions "
             },
             format!("{}█\nEnter applies · Esc clears", app.search),
         ),
@@ -1153,6 +1155,9 @@ fn render_modal(frame: &mut Frame<'_>, app: &App) {
             let model = app
                 .selected_model()
                 .map_or("?", |model| model.name.as_str());
+            let model_type = app
+                .selected_model()
+                .map_or("?", |model| model.model_type.as_str());
             let method = app
                 .form
                 .as_ref()
@@ -1167,7 +1172,7 @@ fn render_modal(frame: &mut Frame<'_>, app: &App) {
                 70,
                 " Review method invocation ",
                 format!(
-                    "Target: {model}\nMethod: {method}\n\n{payload}\n\ny/Enter run · n/Esc edit"
+                    "Definition: {model}\nType: {model_type}\nMethod: {method}\n\n{payload}\n\ny/Enter run · n/Esc edit"
                 ),
             );
         }
@@ -1200,7 +1205,7 @@ fn render_modal(frame: &mut Frame<'_>, app: &App) {
             70,
             70,
             " Help ",
-            "Arrows or j/k  Move selection\nTab              Cycle model/method/output focus\n1/2/3            Overview/Data/Workflows\nEnter            Open, load, or run\n/                Filter models\nr                Refresh\n[ / ]            Data versions or Overview outputs\nSpace            Expand/collapse selected output\na / b            Mark comparison versions\nc                Cancel active run\nEsc              Close dialog or hide run log\nq                Quit\n?                Close help",
+            "Arrows or j/k  Move selection\nTab              Cycle definition/type method/output focus\n1/2/3            Models/Data/Workflows\nEnter            Open, load, or run\n/                Filter definitions\nr                Refresh\n[ / ]            Data versions or type outputs\nSpace            Expand/collapse selected output\na / b            Mark comparison versions\nc                Cancel active run\nEsc              Close dialog or hide run log\nq                Quit\n?                Close help",
         ),
     }
 }
@@ -1445,6 +1450,8 @@ mod tests {
         assert!(rendered.contains("required"));
         assert!(rendered.contains("max: 100"));
         assert!(rendered.contains("Command to run"));
+        assert!(rendered.contains("Definition details"));
+        assert!(rendered.contains("Type methods"));
         assert!(!rendered.contains("\"properties\""));
         assert!(rendered.contains("••••••••"));
     }

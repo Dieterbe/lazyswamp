@@ -13,8 +13,8 @@ TUI.
 
 ## Features
 
-- Browse & search models and inspect their definitions, types, methods,
-  arguments, and output specifications from the Overview screen.
+- Browse & search model definitions, and inspect their type interface, methods,
+  arguments, and output specifications from the Models screen.
 - Validate, review, run, monitor, and cancel model methods. Every run requires
   review; destructive-looking methods also require the model name.
 - Browse artifact metadata and content, select historical versions, view data
@@ -55,20 +55,20 @@ lazyswamp --repo-dir /path/to/repo --swamp-bin /path/to/swamp
 | Key                   | Action                                                 |
 | --------------------- | ------------------------------------------------------ |
 | Arrow keys or `j`/`k` | Move the active selection                              |
-| `Tab`                 | Cycle model, method, and output focus in Overview      |
-| `1`, `2`, `3`         | Open Overview, Data, or Workflows                      |
+| `Tab`                 | Cycle definition, type method, and output focus        |
+| `1`, `2`, `3`         | Open Models, Data, or Workflows                        |
 | `Enter`               | Open, load, validate, or confirm                       |
-| `/`                   | Filter the current model or workflow list              |
+| `/`                   | Filter the current definition or workflow list         |
 | `r`                   | Refresh the current view                               |
-| `[` / `]`             | Select a data version, or an Overview output           |
-| `Space`               | Expand or collapse the selected Overview output schema |
+| `[` / `]`             | Select a data version, or a type output                |
+| `Space`               | Expand or collapse the selected type output schema     |
 | `a` / `b`             | Mark the two versions to compare                       |
 | `c`                   | Cancel the active method run                           |
 | `?`                   | Open contextual help                                   |
 | `Esc`                 | Close a dialog or hide the active method run log       |
 | `q`                   | Quit                                                   |
 
-Method inputs support common JSON Schema types and constraints. The Overview
+Method inputs support common JSON Schema types and constraints. The Models
 screen formats names, types, defaults, maxima, required markers, and
 descriptions as readable rows; nested fields are indented. Schemas using
 references, composition, or conditionals show a concise complex-schema fallback
@@ -77,10 +77,12 @@ Fields marked `writeOnly` or `format: password` are masked and redacted from the
 review screen. Inputs are held only in memory and sent to Swamp as JSON over
 stdin.
 
-Methods live in Overview alongside the selected model's identity and global
-arguments, because that keeps the executable surface visible without an extra
-navigation step. Data and Workflows remain separate because they have different
-browsing and visualization interactions.
+The Models screen distinguishes a YAML model definition from its TypeScript type
+interface: a definition supplies its identity and global arguments, while the
+type supplies methods, argument schemas, and output specifications. Running a
+method targets the selected definition. Per-method definition overrides are not
+shown because `swamp model get --json` does not expose them; reading model YAML
+directly would violate Lazyswamp's CLI-only integration boundary.
 
 Content larger than 1 MiB requires confirmation before loading. Binary content
 shows metadata but is not rendered or compared.
