@@ -32,13 +32,11 @@ type StartupOutcome = (
 type StartupTask = JoinHandle<StartupOutcome>;
 
 enum PreloadEvent {
-    Model(String, crate::error::Result<ModelDetails>),
     Type(String, crate::error::Result<TypeDescription>),
     Workflow(String, crate::error::Result<WorkflowDefinition>),
 }
 
 enum PreloadRequest {
-    Model(String),
     Type(String),
     Workflow(String),
 }
@@ -134,7 +132,6 @@ pub struct App {
     workflow_task: Option<(String, JoinHandle<crate::error::Result<WorkflowDefinition>>)>,
     preload_task: Option<JoinHandle<()>>,
     preload_receiver: Option<mpsc::UnboundedReceiver<PreloadEvent>>,
-    preloading_models: HashSet<String>,
     preloading_types: HashSet<String>,
     preloading_workflows: HashSet<String>,
     preload_total: usize,
@@ -195,7 +192,6 @@ impl App {
             workflow_task: None,
             preload_task: None,
             preload_receiver: None,
-            preloading_models: HashSet::new(),
             preloading_types: HashSet::new(),
             preloading_workflows: HashSet::new(),
             preload_total: 0,
@@ -223,7 +219,6 @@ impl App {
             task.abort();
         }
         self.preload_receiver = None;
-        self.preloading_models.clear();
         self.preloading_types.clear();
         self.preloading_workflows.clear();
         let client = Arc::clone(&self.client);
@@ -310,6 +305,10 @@ impl App {
                 self.detail
                     .as_ref()
                     .and_then(|detail| detail.methods.get(self.method_index))
+            })
+            .or_else(|| {
+                self.selected_model()
+                    .and_then(|model| model.methods.get(self.method_index))
             })
     }
 
@@ -693,14 +692,6 @@ impl App {
         }
         self.preload_receiver = None;
 
-        let selected_name = self.selected_model().map(|model| model.name.clone());
-        let mut model_names: Vec<String> =
-            self.models.iter().map(|model| model.name.clone()).collect();
-        if let Some(selected_name) = selected_name
-            && let Some(index) = model_names.iter().position(|name| name == &selected_name)
-        {
-            model_names.swap(0, index);
-        }
         let model_types: Vec<String> = self
             .models
             .iter()
@@ -714,10 +705,9 @@ impl App {
             .map(|workflow| workflow.name.clone())
             .collect();
 
-        self.preloading_models = model_names.iter().cloned().collect();
         self.preloading_types = model_types.iter().cloned().collect();
         self.preloading_workflows = workflow_names.iter().cloned().collect();
-        self.preload_total = model_names.len() + model_types.len() + workflow_names.len();
+        self.preload_total = model_types.len() + workflow_names.len();
         self.preload_complete = 0;
         if self.preload_total == 0 {
             return;
@@ -731,13 +721,9 @@ impl App {
         let client = Arc::clone(&self.client);
         let (sender, receiver) = mpsc::unbounded_channel();
         let mut requests = Vec::with_capacity(self.preload_total);
-        if !model_names.is_empty() {
-            requests.push(PreloadRequest::Model(model_names.remove(0)));
-        }
         if !workflow_names.is_empty() {
             requests.push(PreloadRequest::Workflow(workflow_names.remove(0)));
         }
-        requests.extend(model_names.into_iter().map(PreloadRequest::Model));
         requests.extend(workflow_names.into_iter().map(PreloadRequest::Workflow));
         requests.extend(model_types.into_iter().map(PreloadRequest::Type));
         self.preload_receiver = Some(receiver);
@@ -753,10 +739,6 @@ impl App {
                         return;
                     };
                     match request {
-                        PreloadRequest::Model(name) => {
-                            let result = client.model(&name).await;
-                            let _ = sender.send(PreloadEvent::Model(name, result));
-                        }
                         PreloadRequest::Type(model_type) => {
                             let result = client.describe_type(&model_type).await;
                             let _ = sender.send(PreloadEvent::Type(model_type, result));
@@ -778,10 +760,6 @@ impl App {
         };
         if !force && self.model_cache.contains_key(&model.name) {
             self.detail = self.model_cache.get(&model.name).cloned();
-            return;
-        }
-        if !force && self.preloading_models.contains(&model.name) {
-            self.status = format!("Preloading {}…", model.name);
             return;
         }
         if let Some((_, task)) = self.model_task.take() {
@@ -1081,28 +1059,6 @@ impl App {
         for event in preload_events {
             self.preload_complete += 1;
             match event {
-                PreloadEvent::Model(name, result) => {
-                    self.preloading_models.remove(&name);
-                    match result {
-                        Ok(detail) => {
-                            self.model_cache.insert(name.clone(), detail.clone());
-                            if self
-                                .selected_model()
-                                .is_some_and(|model| model.name == name)
-                            {
-                                self.detail = Some(detail);
-                            }
-                        }
-                        Err(error) => {
-                            if self
-                                .selected_model()
-                                .is_some_and(|model| model.name == name)
-                            {
-                                self.error = Some(error.to_string());
-                            }
-                        }
-                    }
-                }
                 PreloadEvent::Type(model_type, result) => {
                     self.preloading_types.remove(&model_type);
                     if let Ok(description) = result {
@@ -1255,6 +1211,7 @@ impl App {
                     .as_ref()
                     .map(|description| description.methods.len())
                     .or_else(|| self.detail.as_ref().map(|detail| detail.methods.len()))
+                    .or_else(|| self.selected_model().map(|model| model.methods.len()))
                     .unwrap_or(0);
                 let previous = self.method_index;
                 self.method_index = move_index(self.method_index, length, direction);
@@ -1756,17 +1713,26 @@ mod tests {
         app.begin_load();
         tokio::time::sleep(Duration::from_millis(5)).await;
         app.tick().await;
-        assert_eq!(app.models.len(), 1);
+        assert_eq!(app.models.len(), 2);
 
         tokio::time::sleep(Duration::from_millis(20)).await;
         app.tick().await;
-        assert!(app.detail.is_some());
+        assert!(app.selected_method().is_some());
         assert!(app.type_description.is_some());
         assert_eq!(app.artifacts.len(), 1);
+        tokio::time::sleep(Duration::from_millis(140)).await;
+        app.tick().await;
+        assert!(app.detail.is_some());
         let startup_calls = calls.lock().unwrap().clone();
         assert!(startup_calls.contains(&"version".to_owned()));
         assert!(startup_calls.contains(&"models".to_owned()));
-        assert!(startup_calls.contains(&"model".to_owned()));
+        assert_eq!(
+            startup_calls
+                .iter()
+                .filter(|call| call.as_str() == "model")
+                .count(),
+            1
+        );
         assert!(startup_calls.contains(&"describe".to_owned()));
         assert!(startup_calls.contains(&"all_data".to_owned()));
         assert!(startup_calls.contains(&"workflows".to_owned()));
@@ -1802,11 +1768,22 @@ mod tests {
 
         async fn models(&self) -> Result<Vec<ModelSummary>> {
             self.calls.lock().unwrap().push("models".to_owned());
-            Ok(vec![ModelSummary {
-                id: "model-id".to_owned(),
-                name: "hello-world".to_owned(),
-                model_type: "command/shell".to_owned(),
-            }])
+            Ok(vec![
+                ModelSummary {
+                    id: "model-id".to_owned(),
+                    name: "hello-world".to_owned(),
+                    model_type: "command/shell".to_owned(),
+                    global_arguments_schema: Some(json!({"type": "object"})),
+                    methods: vec![method()],
+                },
+                ModelSummary {
+                    id: "second-model-id".to_owned(),
+                    name: "second-world".to_owned(),
+                    model_type: "command/shell".to_owned(),
+                    global_arguments_schema: Some(json!({"type": "object"})),
+                    methods: vec![method()],
+                },
+            ])
         }
 
         async fn model(&self, _name: &str) -> Result<ModelDetails> {

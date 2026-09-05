@@ -13,6 +13,7 @@ use super::{
     DataArtifact, DataContent, DataVersion, ModelDetails, ModelSummary, SwampClient,
     TypeDescription, WorkflowDefinition, WorkflowSummary,
     data::{DataListResponse, QueryResponse, VersionsResponse},
+    model::decode_search_response,
 };
 use crate::error::{Error, Result};
 
@@ -101,18 +102,11 @@ impl SwampClient for SwampCli {
     }
 
     async fn models(&self) -> Result<Vec<ModelSummary>> {
-        #[derive(Deserialize)]
-        struct Response {
-            #[serde(default)]
-            results: Vec<ModelSummary>,
-        }
         let value = self.json(&["model", "search"], "model search").await?;
-        serde_json::from_value::<Response>(value)
-            .map(|response| response.results)
-            .map_err(|source| Error::Json {
-                context: "model search",
-                source,
-            })
+        decode_search_response(value).map_err(|source| Error::Json {
+            context: "model search",
+            source,
+        })
     }
 
     async fn model(&self, name: &str) -> Result<ModelDetails> {

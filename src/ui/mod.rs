@@ -552,7 +552,9 @@ fn render_overview(frame: &mut Frame<'_>, app: &App, area: Rect) {
 }
 
 fn render_model_summary(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    let Some(detail) = &app.detail else {
+    let detail = app.detail.as_ref();
+    let model = app.selected_model();
+    if detail.is_none() && model.is_none() {
         frame.render_widget(
             panel(
                 " Overview ",
@@ -562,16 +564,30 @@ fn render_model_summary(frame: &mut Frame<'_>, app: &App, area: Rect) {
             area,
         );
         return;
-    };
+    }
+    let name = detail
+        .map(|detail| detail.name.as_str())
+        .or_else(|| model.map(|model| model.name.as_str()))
+        .unwrap_or("?");
+    let id = detail
+        .map(|detail| detail.id.as_str())
+        .or_else(|| model.map(|model| model.id.as_str()))
+        .unwrap_or("?");
+    let model_type = detail
+        .map(|detail| detail.model_type.as_str())
+        .or_else(|| model.map(|model| model.model_type.as_str()))
+        .unwrap_or("?");
+    let type_version = detail
+        .and_then(|detail| detail.type_version.as_deref())
+        .unwrap_or("unknown");
+    let definition_version = detail
+        .and_then(|detail| detail.version)
+        .map_or_else(|| "?".to_owned(), |version| version.to_string());
     let mut lines = vec![
-        Line::from(format!("Name: {}   ID: {}", detail.name, detail.id)),
+        Line::from(format!("Name: {name}   ID: {id}")),
         Line::from(format!(
             "Type: {}   Type version: {}   Definition: v{}",
-            detail.model_type,
-            detail.type_version.as_deref().unwrap_or("unknown"),
-            detail
-                .version
-                .map_or_else(|| "?".to_owned(), |version| version.to_string())
+            model_type, type_version, definition_version
         )),
         Line::from(""),
         Line::from(Span::styled(
@@ -579,7 +595,14 @@ fn render_model_summary(frame: &mut Frame<'_>, app: &App, area: Rect) {
             Style::default().add_modifier(Modifier::BOLD),
         )),
     ];
-    lines.extend(format_global_arguments(&detail.global_arguments));
+    if let Some(arguments) = detail.map(|detail| &detail.global_arguments) {
+        lines.extend(format_global_arguments(arguments));
+    } else {
+        lines.push(Line::from(Span::styled(
+            "Loading definition details…",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
     if lines.len() == 4 {
         lines.push(Line::from(Span::styled(
             "None",
@@ -604,6 +627,7 @@ fn render_method_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
         .as_ref()
         .map(|description| description.methods.as_slice())
         .or_else(|| app.detail.as_ref().map(|detail| detail.methods.as_slice()))
+        .or_else(|| app.selected_model().map(|model| model.methods.as_slice()))
         .unwrap_or(&[]);
     let items: Vec<ListItem<'_>> = methods
         .iter()

@@ -100,13 +100,14 @@ the UI to private storage layouts.
 
 The interface renders before startup probes finish. Model and workflow searches
 run alongside one repository-wide query for the latest data metadata. Lazyswamp
-then preloads every model definition, workflow definition, and unique model type
-description with an adaptive pool of 4–12 workers. The selected model and first
-workflow are prioritized, and results are cached as each worker finishes, so
-browsing becomes progressively instant. Artifact content remains on demand
-because it can be large. Loading definitions only after selection was
-considered, but rejected because it made browsing latency proportional to the
-startup cost of each `swamp` invocation.
+uses the enriched model-search metadata for methods and global-argument
+schemas, then preloads only workflow definitions and unique model type
+descriptions with an adaptive pool of 4–12 workers. This avoids one `model get`
+process per model while retaining full output schemas. Definition retrieval is
+lazy when search does not include the configured global arguments, and remains
+required to re-check destructive invocations. Artifact content remains on demand
+because it can be large. Preloading every definition was considered, but is
+inferior now that search supplies the shared method metadata.
 
 Workflow graphs are rendered from `swamp workflow search --json` and
 `swamp workflow get --json`. Capturing Swamp's built-in `--graph` text was
