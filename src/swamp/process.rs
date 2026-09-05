@@ -12,12 +12,13 @@ use tokio::{
 use super::{
     DataArtifact, DataContent, DataVersion, ModelDetails, ModelSummary, SwampClient,
     TypeDescription, WorkflowDefinition, WorkflowSummary,
-    data::{DataListResponse, QueryResponse, VersionsResponse},
+    data::{DataListResponse, QueryResponse, VersionQueryResponse, VersionsResponse},
     model::decode_search_response,
 };
 use crate::error::{Error, Result};
 
 const ALL_DATA_SELECT: &str = r#"{"id": id, "name": name, "version": version, "createdAt": createdAt, "modelName": modelName, "modelId": modelId, "dataType": dataType, "contentType": contentType, "lifetime": lifetime, "ownerType": ownerType, "workflowName": workflowName, "workflowRunId": workflowRunId, "jobName": jobName, "stepName": stepName, "source": source, "streaming": streaming, "size": size, "tags": tags}"#;
+const VERSION_HISTORY_SELECT: &str = r#"{"version": version, "createdAt": createdAt, "size": size, "isLatest": isLatest, "ownerType": ownerType, "workflowName": workflowName, "workflowRunId": workflowRunId, "jobName": jobName, "stepName": stepName, "source": source}"#;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RunEvent {
@@ -317,44 +318,58 @@ impl SwampClient for SwampCli {
     }
 
     async fn data_versions(&self, model: &str, name: &str) -> Result<Vec<DataVersion>> {
+        let predicate = format!(
+            "modelName == {} && name == {} && version >= 0",
+            cel_string(model),
+            cel_string(name)
+        );
         let value = self
-            .json(&["data", "versions", model, name], "data versions")
+            .json(
+                &[
+                    "data",
+                    "query",
+                    &predicate,
+                    "--select",
+                    VERSION_HISTORY_SELECT,
+                ],
+                "data versions",
+            )
             .await?;
-        let mut response: VersionsResponse =
+        let mut response: VersionQueryResponse =
             serde_json::from_value(value).map_err(|source| Error::Json {
                 context: "data versions",
                 source,
             })?;
+        if response.results.is_empty() {
+            let value = self
+                .json(&["data", "versions", model, name], "data versions fallback")
+                .await?;
+            let fallback: VersionsResponse =
+                serde_json::from_value(value).map_err(|source| Error::Json {
+                    context: "data versions fallback",
+                    source,
+                })?;
+            response.results = fallback.versions;
+        }
         response
-            .versions
+            .results
             .sort_by_key(|version| Reverse(version.version));
-        Ok(response.versions)
+        Ok(response.results)
     }
 
     async fn data_version(&self, model: &str, name: &str, version: u64) -> Result<DataContent> {
-        let predicate = historical_predicate(model, name, version);
+        let version = version.to_string();
         let value = self
-            .json(&["data", "query", &predicate], "historical data")
+            .json(
+                &["data", "get", model, name, "--version", &version],
+                "historical data",
+            )
             .await?;
-        let response: QueryResponse =
-            serde_json::from_value(value).map_err(|source| Error::Json {
-                context: "historical data",
-                source,
-            })?;
-        response
-            .results
-            .into_iter()
-            .next()
-            .ok_or(Error::VersionNotFound)
+        serde_json::from_value(value).map_err(|source| Error::Json {
+            context: "historical data",
+            source,
+        })
     }
-}
-
-pub(crate) fn historical_predicate(model: &str, name: &str, version: u64) -> String {
-    format!(
-        "modelName == {} && name == {} && version == {version}",
-        cel_string(model),
-        cel_string(name)
-    )
 }
 
 fn cel_string(value: &str) -> String {
@@ -380,18 +395,5 @@ fn command_error(status: std::process::ExitStatus, stdout: &[u8], stderr: &[u8])
             .map(|item| item.error.clone())
             .unwrap_or_else(|| String::from_utf8_lossy(fallback).trim().to_owned()),
         code: envelope.and_then(|item| item.code),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::historical_predicate;
-
-    #[test]
-    fn escapes_cel_string_values() {
-        assert_eq!(
-            historical_predicate("a\"b", "line\nname", 7),
-            "modelName == \"a\\\"b\" && name == \"line\\nname\" && version == 7"
-        );
     }
 }

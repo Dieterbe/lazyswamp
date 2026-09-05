@@ -93,7 +93,7 @@ impl DataOrigin {
         match self {
             Self::All => "All origins",
             Self::Direct => "Direct runs",
-            Self::Workflow => "Workflow steps",
+            Self::Workflow => "Workflow runs",
             Self::Manual => "Manual",
         }
     }
@@ -107,12 +107,25 @@ impl DataOrigin {
         }
     }
 
-    fn matches(self, artifact: &DataArtifact) -> bool {
+    fn matches(self, version: &DataVersion) -> bool {
         match self {
             Self::All => true,
-            Self::Direct => artifact.owner_type == "model-method",
-            Self::Workflow => artifact.owner_type == "workflow-step",
-            Self::Manual => artifact.owner_type == "manual",
+            _ => version_origin(version).is_some_and(|origin| origin == self),
+        }
+    }
+}
+
+pub fn version_origin(version: &DataVersion) -> Option<DataOrigin> {
+    if !version.workflow_name.is_empty()
+        || !version.workflow_run_id.is_empty()
+        || version.owner_type == "workflow-step"
+    {
+        Some(DataOrigin::Workflow)
+    } else {
+        match version.owner_type.as_str() {
+            "model-method" => Some(DataOrigin::Direct),
+            "manual" => Some(DataOrigin::Manual),
+            _ => None,
         }
     }
 }
@@ -386,17 +399,10 @@ impl App {
     pub fn visible_artifacts(&self) -> impl Iterator<Item = &DataArtifact> {
         let needle = self.resource_search.to_ascii_lowercase();
         self.artifacts.iter().filter(move |artifact| {
-            self.data_origin.matches(artifact)
-                && (needle.is_empty()
-                    || artifact.name.to_ascii_lowercase().contains(&needle)
-                    || artifact.data_type.to_ascii_lowercase().contains(&needle)
-                    || artifact.content_type.to_ascii_lowercase().contains(&needle)
-                    || artifact
-                        .workflow_name
-                        .to_ascii_lowercase()
-                        .contains(&needle)
-                    || artifact.job_name.to_ascii_lowercase().contains(&needle)
-                    || artifact.step_name.to_ascii_lowercase().contains(&needle))
+            needle.is_empty()
+                || artifact.name.to_ascii_lowercase().contains(&needle)
+                || artifact.data_type.to_ascii_lowercase().contains(&needle)
+                || artifact.content_type.to_ascii_lowercase().contains(&needle)
         })
     }
 
@@ -404,14 +410,40 @@ impl App {
         self.visible_artifacts().nth(self.artifact_index)
     }
 
+    /// Returns the metadata for the content currently shown in the data pane.
+    ///
+    /// The resource list represents its latest version, while `content` can be
+    /// an explicitly loaded historical version.
+    pub fn displayed_artifact(&self) -> Option<DataArtifact> {
+        let selected = self.selected_artifact()?;
+        self.content
+            .as_ref()
+            .filter(|content| {
+                content.name == selected.name
+                    && content.model_id == selected.model_id
+                    && content.model_name == selected.model_name
+            })
+            .cloned()
+            .map(DataContent::into_artifact)
+            .or_else(|| Some(selected.clone()))
+    }
+
     pub fn visible_versions(&self) -> impl Iterator<Item = &DataVersion> {
         let needle = self.version_search.to_ascii_lowercase();
         self.versions.iter().filter(move |version| {
-            needle.is_empty()
-                || version.version.to_string().contains(&needle)
-                || version.created_at.to_ascii_lowercase().contains(&needle)
-                || version.size.to_string().contains(&needle)
+            self.data_origin.matches(version)
+                && (needle.is_empty()
+                    || version.version.to_string().contains(&needle)
+                    || version.created_at.to_ascii_lowercase().contains(&needle)
+                    || version.size.to_string().contains(&needle)
+                    || version.workflow_name.to_ascii_lowercase().contains(&needle)
+                    || version.job_name.to_ascii_lowercase().contains(&needle)
+                    || version.step_name.to_ascii_lowercase().contains(&needle))
         })
+    }
+
+    pub fn versions_loading(&self) -> bool {
+        self.version_task.is_some()
     }
 
     pub fn selected_version(&self) -> Option<&DataVersion> {
@@ -524,7 +556,7 @@ impl App {
             KeyCode::Down | KeyCode::Char('j') => self.move_selection(1).await,
             KeyCode::Enter => self.open_selected().await,
             KeyCode::Char('c') if self.run_receiver.is_some() => self.cancel_run().await,
-            KeyCode::Char('o') if self.tab == Tab::Data && self.focus == Focus::Content => {
+            KeyCode::Char('o') if self.tab == Tab::Data && self.focus == Focus::Versions => {
                 self.cycle_data_origin()
             }
             KeyCode::Char(' ') if self.tab == Tab::Data && self.focus == Focus::Versions => {
@@ -1025,6 +1057,7 @@ impl App {
         let client = Arc::clone(&self.client);
         let task_model = model.clone();
         let task_name = name.clone();
+        self.status = format!("Loading version history for {name}…");
         self.version_task = Some((
             model,
             name,
@@ -1230,12 +1263,20 @@ impl App {
                     .is_some_and(|artifact| artifact.name == name);
             match task.await {
                 Ok(Ok(versions)) if still_selected => {
+                    let count = versions.len();
                     self.versions = versions;
                     self.version_cursor = 0;
                     self.compare_base = None;
+                    self.status = if count == 0 {
+                        format!("No versions found for {name}")
+                    } else {
+                        format!("Loaded {count} version(s) for {name}")
+                    };
                 }
                 Ok(Ok(_)) => {}
-                Ok(Err(error)) if still_selected => self.error = Some(error.to_string()),
+                Ok(Err(error)) if still_selected => {
+                    self.fail(format!("Could not load version history: {error}"));
+                }
                 Ok(Err(_)) => {}
                 Err(error) if !error.is_cancelled() => {
                     self.error = Some(format!("Version loading task failed: {error}"));
@@ -1483,9 +1524,9 @@ impl App {
 
     fn cycle_data_origin(&mut self) {
         self.data_origin = self.data_origin.next();
-        self.artifact_index = 0;
-        self.clear_data_view();
-        self.schedule_versions(false);
+        self.version_cursor = 0;
+        self.compare_base = None;
+        self.diff = None;
         self.status = format!("Data origin: {}", self.data_origin.label());
     }
 
@@ -1875,18 +1916,21 @@ mod tests {
     }
 
     #[test]
-    fn data_origin_filters_artifacts_by_owner_type() {
-        let mut workflow = artifact();
-        workflow.owner_type = "workflow-step".to_owned();
-        let mut manual = artifact();
+    fn data_origin_uses_version_workflow_provenance_not_definition_ownership() {
+        let mut workflow = version(1);
+        workflow.owner_type = "model-method".to_owned();
+        workflow.workflow_name = "nightly".to_owned();
+        workflow.workflow_run_id = "run-id".to_owned();
+        let mut manual = version(1);
         manual.owner_type = "manual".to_owned();
 
-        assert!(DataOrigin::Direct.matches(&artifact()));
+        assert!(DataOrigin::Direct.matches(&version(1)));
         assert!(DataOrigin::Workflow.matches(&workflow));
+        assert!(!DataOrigin::Direct.matches(&workflow));
         assert!(DataOrigin::Manual.matches(&manual));
-        assert!(!DataOrigin::Workflow.matches(&artifact()));
+        assert!(!DataOrigin::Workflow.matches(&version(1)));
         assert_eq!(DataOrigin::All.next(), DataOrigin::Direct);
-        assert_eq!(DataOrigin::Workflow.label(), "Workflow steps");
+        assert_eq!(DataOrigin::Workflow.label(), "Workflow runs");
     }
 
     #[tokio::test]
@@ -1960,9 +2004,13 @@ mod tests {
 
         app.tab = Tab::Data;
         app.focus = Focus::Versions;
+        app.versions = vec![version(2), version(1)];
+        app.version_cursor = 1;
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .await;
         assert_eq!(app.versions.len(), 2);
+        assert_eq!(app.displayed_artifact().unwrap().version, 1);
+        app.version_cursor = 0;
         app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
             .await;
         app.handle_key(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::NONE))
@@ -2183,6 +2231,12 @@ mod tests {
             size: 10,
             checksum: String::new(),
             is_latest: number == 2,
+            owner_type: "model-method".to_owned(),
+            workflow_name: String::new(),
+            workflow_run_id: String::new(),
+            job_name: String::new(),
+            step_name: String::new(),
+            source: String::new(),
         }
     }
 

@@ -10,7 +10,7 @@ use ratatui::{
 };
 
 use crate::{
-    app::{App, Focus, InputMode, Tab},
+    app::{App, Focus, InputMode, Tab, version_origin},
     schema::FormMode,
 };
 
@@ -1173,27 +1173,18 @@ fn render_data(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let items: Vec<ListItem<'_>> = app
         .visible_artifacts()
         .map(|artifact| {
-            let origin = match artifact.owner_type.as_str() {
-                "workflow-step" => "workflow",
-                "model-method" => "direct",
-                "manual" => "manual",
-                _ => "unknown",
-            };
             ListItem::new(vec![
                 Line::from(format!("{}  v{}", artifact.name, artifact.version)),
                 Line::from(Span::styled(
-                    format!(
-                        "{} · {} · {origin}",
-                        artifact.data_type, artifact.content_type
-                    ),
+                    format!("{} · {}", artifact.data_type, artifact.content_type),
                     Style::default().fg(Color::DarkGray),
                 )),
             ])
         })
         .collect();
-    let resource_title = format!(" Resources · {} ", app.data_origin.label());
+    let resource_title = " Resources ";
     let list = List::new(items)
-        .block(content_block(&resource_title, app))
+        .block(content_block(resource_title, app))
         .highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White))
         .highlight_symbol("› ");
     let mut state = ListState::default().with_selected(Some(app.artifact_index));
@@ -1201,7 +1192,11 @@ fn render_data(frame: &mut Frame<'_>, app: &App, area: Rect) {
 
     let version_items: Vec<ListItem<'_>> = if app.versions.is_empty() {
         vec![ListItem::new(Span::styled(
-            "Loading version history…",
+            if app.versions_loading() {
+                "Loading version history…"
+            } else {
+                "No version history."
+            },
             Style::default().fg(Color::DarkGray),
         ))]
     } else {
@@ -1222,6 +1217,10 @@ fn render_data(frame: &mut Frame<'_>, app: &App, area: Rect) {
                         format!("{} · {} B", version.created_at, version.size),
                         Style::default().fg(Color::DarkGray),
                     )),
+                    Line::from(Span::styled(
+                        format_version_origin(version),
+                        Style::default().fg(Color::DarkGray),
+                    )),
                 ])
             })
             .collect()
@@ -1229,7 +1228,7 @@ fn render_data(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let versions = List::new(version_items)
         .block(
             Block::default()
-                .title(" Versions ")
+                .title(format!(" Versions · {} ", app.data_origin.label()))
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(if app.focus == Focus::Versions {
                     ACCENT
@@ -1247,7 +1246,7 @@ fn render_data(frame: &mut Frame<'_>, app: &App, area: Rect) {
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(12), Constraint::Min(5)])
         .split(chunks[2]);
-    let metadata = app.selected_artifact().map_or_else(
+    let metadata = app.displayed_artifact().map_or_else(
         || "No data produced by this model.".to_owned(),
         |artifact| {
             let mut metadata = format!(
@@ -1312,6 +1311,24 @@ fn render_data(frame: &mut Frame<'_>, app: &App, area: Rect) {
     );
 }
 
+fn format_version_origin(version: &crate::swamp::DataVersion) -> String {
+    match version_origin(version) {
+        Some(crate::app::DataOrigin::Workflow) => {
+            let mut label = "workflow".to_owned();
+            if !version.workflow_name.is_empty() {
+                label.push_str(&format!(" · {}", version.workflow_name));
+            }
+            if !version.job_name.is_empty() || !version.step_name.is_empty() {
+                label.push_str(&format!(" / {}.{}", version.job_name, version.step_name));
+            }
+            label
+        }
+        Some(crate::app::DataOrigin::Direct) => "direct".to_owned(),
+        Some(crate::app::DataOrigin::Manual) => "manual".to_owned(),
+        _ => "unknown origin".to_owned(),
+    }
+}
+
 fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let mut lines = vec![Line::from(vec![
         Span::styled(app.status.as_str(), Style::default().fg(ACCENT)),
@@ -1345,9 +1362,15 @@ fn normal_footer_hints(app: &App) -> Vec<&'static str> {
         (Tab::Overview, Focus::Content) => vec!["↑/↓ method", "Enter run"],
         (Tab::Overview, Focus::Outputs) => vec!["↑/↓ output", "Space expand"],
         (Tab::Data, Focus::Models) => vec!["↑/↓ definition", "Enter inspect"],
-        (Tab::Data, Focus::Content) => vec!["↑/↓ resource", "Enter load latest", "o origin"],
+        (Tab::Data, Focus::Content) => vec!["↑/↓ resource", "Enter load latest"],
         (Tab::Data, Focus::Versions) => {
-            vec!["↑/↓ version", "Enter load", "Space base", "d compare"]
+            vec![
+                "↑/↓ version",
+                "Enter load",
+                "o origin",
+                "Space base",
+                "d compare",
+            ]
         }
         (Tab::Workflows, Focus::Models) => vec!["↑/↓ workflow", "Enter inspect"],
         (Tab::Workflows, Focus::Content) => vec!["↑/↓ step"],

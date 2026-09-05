@@ -29,9 +29,6 @@ pub enum Error {
     #[error("invalid method input: {0}")]
     Validation(String),
 
-    #[error("no matching historical data version was returned")]
-    VersionNotFound,
-
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
