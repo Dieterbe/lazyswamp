@@ -524,7 +524,9 @@ impl App {
             KeyCode::Down | KeyCode::Char('j') => self.move_selection(1).await,
             KeyCode::Enter => self.open_selected().await,
             KeyCode::Char('c') if self.run_receiver.is_some() => self.cancel_run().await,
-            KeyCode::Char('o') if self.tab == Tab::Data => self.cycle_data_origin(),
+            KeyCode::Char('o') if self.tab == Tab::Data && self.focus == Focus::Content => {
+                self.cycle_data_origin()
+            }
             KeyCode::Char(' ') if self.tab == Tab::Data && self.focus == Focus::Versions => {
                 self.toggle_comparison_base()
             }
@@ -540,8 +542,12 @@ impl App {
             KeyCode::Char(']') if self.tab == Tab::Overview && self.focus == Focus::Outputs => {
                 self.move_output(1)
             }
-            KeyCode::Char('[') if self.tab == Tab::Data => self.move_version(-1),
-            KeyCode::Char(']') if self.tab == Tab::Data => self.move_version(1),
+            KeyCode::Char('[') if self.tab == Tab::Data && self.focus == Focus::Versions => {
+                self.move_version(-1)
+            }
+            KeyCode::Char(']') if self.tab == Tab::Data && self.focus == Focus::Versions => {
+                self.move_version(1)
+            }
             _ => {}
         }
     }

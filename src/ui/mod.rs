@@ -38,7 +38,7 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
 }
 
 fn render_header(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    let tabs = Tabs::new(vec!["1 Models", "2 Data", "3 Workflows"])
+    let tabs = Tabs::new(vec!["Models", "Data", "Workflows"])
         .select(match app.tab {
             Tab::Overview => 0,
             Tab::Data => 1,
@@ -201,7 +201,7 @@ fn render_workflows(frame: &mut Frame<'_>, app: &App, area: Rect) {
         WorkflowDag::new(
             dag_nodes(app),
             app.workflow_node_index,
-            content_block(" Dependency graph · j/k select node ", app),
+            content_block(" Dependency graph ", app),
         ),
         sections[1],
     );
@@ -734,7 +734,7 @@ fn render_method_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
         .map(|method| ListItem::new(method.name.as_str()))
         .collect();
     let list = List::new(items)
-        .block(content_block(" Type methods · Enter to run ", app))
+        .block(content_block(" Type methods ", app))
         .highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White))
         .highlight_symbol("› ");
     let mut state = ListState::default().with_selected(Some(app.method_index));
@@ -777,9 +777,7 @@ fn render_method_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
     } else {
         Text::raw("This type exposes no methods.")
     };
-    let title = if show_run_log && app.run_receiver.is_some() {
-        " Method run output (c to cancel) "
-    } else if show_run_log {
+    let title = if show_run_log {
         " Method run output "
     } else {
         " Type interface "
@@ -891,7 +889,7 @@ fn format_output_specifications(
                 .and_then(serde_json::Value::as_object)
                 .map_or(0, serde_json::Map::len);
             lines.push(Line::from(Span::styled(
-                format!("    Schema: {field_count} fields · Space to expand"),
+                format!("    Schema: {field_count} fields"),
                 Style::default().fg(Color::DarkGray),
             )));
         }
@@ -1193,7 +1191,7 @@ fn render_data(frame: &mut Frame<'_>, app: &App, area: Rect) {
             ])
         })
         .collect();
-    let resource_title = format!(" Resources · {} · o origin ", app.data_origin.label());
+    let resource_title = format!(" Resources · {} ", app.data_origin.label());
     let list = List::new(items)
         .block(content_block(&resource_title, app))
         .highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White))
@@ -1231,7 +1229,7 @@ fn render_data(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let versions = List::new(version_items)
         .block(
             Block::default()
-                .title(" Versions · Space base · d compare ")
+                .title(" Versions ")
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(if app.focus == Focus::Versions {
                     ACCENT
@@ -1298,7 +1296,7 @@ fn render_data(frame: &mut Frame<'_>, app: &App, area: Rect) {
             if app.content.is_some() {
                 "Binary content is not previewed.".to_owned()
             } else {
-                "Enter loads the selected version. Choose a version with [ / ].".to_owned()
+                "Select a version to load its content.".to_owned()
             }
         })
     };
@@ -1306,7 +1304,7 @@ fn render_data(frame: &mut Frame<'_>, app: &App, area: Rect) {
         Paragraph::new(body)
             .block(
                 Block::default()
-                    .title(" Content / diff · Enter loads selected version ")
+                    .title(" Content / diff ")
                     .borders(Borders::ALL),
             )
             .wrap(Wrap { trim: false }),
@@ -1317,7 +1315,8 @@ fn render_data(frame: &mut Frame<'_>, app: &App, area: Rect) {
 fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let mut lines = vec![Line::from(vec![
         Span::styled(app.status.as_str(), Style::default().fg(ACCENT)),
-        Span::raw("  ·  / filter focused list · Tab focus · r refresh · ? help · q quit"),
+        Span::raw("  ·  "),
+        Span::raw(footer_hints(app).join(" · ")),
     ])];
     if let Some(error) = &app.error {
         lines.push(Line::from(Span::styled(
@@ -1326,6 +1325,49 @@ fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
         )));
     }
     frame.render_widget(Paragraph::new(lines), area);
+}
+
+fn footer_hints(app: &App) -> Vec<&'static str> {
+    match app.mode {
+        InputMode::Search(_) => vec!["type filter", "Enter apply", "Esc clear"],
+        InputMode::MethodForm => vec!["type edit", "↑/↓ field", "Enter validate", "Esc cancel"],
+        InputMode::Review => vec!["y/Enter run", "n/Esc edit"],
+        InputMode::DestructiveConfirm(_) => vec!["type name", "Enter confirm", "Esc return"],
+        InputMode::LargeConfirm(_) => vec!["y/Enter load", "n/Esc cancel"],
+        InputMode::Help => vec!["?/Esc close"],
+        InputMode::Normal => normal_footer_hints(app),
+    }
+}
+
+fn normal_footer_hints(app: &App) -> Vec<&'static str> {
+    let mut hints = match (app.tab, app.focus) {
+        (Tab::Overview, Focus::Models) => vec!["↑/↓ definition", "Enter inspect"],
+        (Tab::Overview, Focus::Content) => vec!["↑/↓ method", "Enter run"],
+        (Tab::Overview, Focus::Outputs) => vec!["↑/↓ output", "Space expand"],
+        (Tab::Data, Focus::Models) => vec!["↑/↓ definition", "Enter inspect"],
+        (Tab::Data, Focus::Content) => vec!["↑/↓ resource", "Enter load latest", "o origin"],
+        (Tab::Data, Focus::Versions) => {
+            vec!["↑/↓ version", "Enter load", "Space base", "d compare"]
+        }
+        (Tab::Workflows, Focus::Models) => vec!["↑/↓ workflow", "Enter inspect"],
+        (Tab::Workflows, Focus::Content) => vec!["↑/↓ step"],
+        _ => Vec::new(),
+    };
+    if app.run_receiver.is_some() {
+        hints.push("c cancel run");
+    }
+    if app.run_log_visible && app.run_log_matches_selection() {
+        hints.push("Esc hide run output");
+    }
+    hints.extend([
+        "Tab focus",
+        "/ filter",
+        "r refresh",
+        "1/2/3 tabs",
+        "? help",
+        "q quit",
+    ]);
+    hints
 }
 
 fn render_modal(frame: &mut Frame<'_>, app: &App) {
@@ -1341,7 +1383,7 @@ fn render_modal(frame: &mut Frame<'_>, app: &App) {
                 crate::app::SearchTarget::Resources => " Filter resources ",
                 crate::app::SearchTarget::Versions => " Filter versions ",
             },
-            format!("{}█\nEnter applies · Esc clears", app.search_text(*target)),
+            format!("{}█", app.search_text(*target)),
         ),
         InputMode::MethodForm => render_form_popup(frame, app),
         InputMode::Review => {
@@ -1364,9 +1406,7 @@ fn render_modal(frame: &mut Frame<'_>, app: &App) {
                 76,
                 70,
                 " Review method invocation ",
-                format!(
-                    "Definition: {model}\nType: {model_type}\nMethod: {method}\n\n{payload}\n\ny/Enter run · n/Esc edit"
-                ),
+                format!("Definition: {model}\nType: {model_type}\nMethod: {method}\n\n{payload}"),
             );
         }
         InputMode::DestructiveConfirm(text) => {
@@ -1379,7 +1419,7 @@ fn render_modal(frame: &mut Frame<'_>, app: &App) {
                 9,
                 " Destructive-looking method ",
                 format!(
-                    "This method may be destructive.\nType the model name `{model}` to continue:\n\n{text}█\n\nEnter confirms · Esc returns"
+                    "This method may be destructive.\nType the model name `{model}` to continue:\n\n{text}█"
                 ),
             );
         }
@@ -1389,7 +1429,7 @@ fn render_modal(frame: &mut Frame<'_>, app: &App) {
             8,
             " Large content ",
             format!(
-                "This operation exceeds the {} byte preview threshold.\n\ny/Enter load anyway · n/Esc cancel",
+                "This operation exceeds the {} byte preview threshold.",
                 app.config.preview_limit
             ),
         ),
@@ -1398,7 +1438,7 @@ fn render_modal(frame: &mut Frame<'_>, app: &App) {
             70,
             70,
             " Help ",
-            "Arrows or j/k  Move selection\nTab              Cycle focused panes\n1/2/3            Models/Data/Workflows\nEnter            Open, load, or run\n/                Filter focused list\nr                Refresh\no                Cycle Data origin filter\n[ / ]            Data versions or type outputs\nSpace            Toggle output or mark comparison base\nd                Compare base version with selected version\nc                Cancel active run\nEsc              Close dialog or hide run log\nq                Quit\n?                Close help",
+            "The footer lists the controls available for the current pane.\n\nIt changes with the selected tab, pane, and dialog.\n\nOutput schemas can be expanded. Data versions can be marked as a comparison base and compared with the selected version.",
         ),
     }
 }
@@ -1409,7 +1449,7 @@ fn render_form_popup(frame: &mut Frame<'_>, app: &App) {
     };
     let text = match &form.mode {
         FormMode::RawJson(value) => format!(
-            "The schema uses constructs not represented by field widgets.\nEdit the complete JSON value:\n\n{value}█\n\nEnter validates · Esc cancels"
+            "The schema uses constructs not represented by field widgets.\nEdit the complete JSON value:\n\n{value}█"
         ),
         FormMode::Fields(fields) => {
             let mut lines = vec!["Edit inputs; optional empty values are omitted.".to_owned()];
@@ -1430,7 +1470,6 @@ fn render_form_popup(frame: &mut Frame<'_>, app: &App) {
                 }
             }
             lines.push(String::new());
-            lines.push("Enter validates · arrows select · Space cycles · Esc cancels".to_owned());
             lines.join("\n")
         }
     };
