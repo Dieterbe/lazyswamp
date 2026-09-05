@@ -69,14 +69,15 @@ lazyswamp --repo-dir /path/to/repo --swamp-bin /path/to/swamp
 | Key                   | Action                                                 |
 | --------------------- | ------------------------------------------------------ |
 | Arrow keys or `j`/`k` | Move the active selection                              |
-| `Tab`                 | Cycle definition, type method, and output focus        |
+| `Tab`                 | Cycle the focused pane                                 |
 | `1`, `2`, `3`         | Open Models, Data, or Workflows                        |
 | `Enter`               | Open, load, validate, or confirm                       |
-| `/`                   | Filter the current definition or workflow list         |
+| `/`                   | Filter the focused definition, resource, or version list |
 | `r`                   | Refresh the current view                               |
+| `o`                   | Cycle the Data-tab origin filter                       |
 | `[` / `]`             | Select a data version, or a type output                |
-| `Space`               | Expand or collapse the selected type output schema     |
-| `a` / `b`             | Mark the two versions to compare                       |
+| `Space`               | Toggle an output schema, or mark a base version        |
+| `d`                   | Compare the base version with the selected version     |
 | `c`                   | Cancel the active method run                           |
 | `?`                   | Open contextual help                                   |
 | `Esc`                 | Close a dialog or hide the active method run log       |
@@ -100,6 +101,11 @@ directly would violate Lazyswamp's CLI-only integration boundary.
 
 Content larger than 1 MiB requires confirmation before loading. Binary content
 shows metadata but is not rendered or compared.
+
+The Data tab lists current resources for the selected definition, shows their
+version history without loading content, and filters resources by direct run,
+workflow step, or manual origin. Selecting a version loads it on demand;
+Swamp's catalog metadata supplies the workflow, run, job, and step provenance.
 
 ## Design decisions
 

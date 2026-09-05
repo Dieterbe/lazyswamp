@@ -28,6 +28,16 @@ pub struct DataArtifact {
     #[serde(default)]
     pub owner_type: String,
     #[serde(default)]
+    pub workflow_name: String,
+    #[serde(default)]
+    pub workflow_run_id: String,
+    #[serde(default)]
+    pub job_name: String,
+    #[serde(default)]
+    pub step_name: String,
+    #[serde(default)]
+    pub source: String,
+    #[serde(default)]
     pub tags: BTreeMap<String, String>,
 }
 
@@ -57,6 +67,16 @@ pub struct DataContent {
     pub tags: BTreeMap<String, String>,
     #[serde(default)]
     pub owner_type: String,
+    #[serde(default)]
+    pub workflow_name: String,
+    #[serde(default)]
+    pub workflow_run_id: String,
+    #[serde(default)]
+    pub job_name: String,
+    #[serde(default)]
+    pub step_name: String,
+    #[serde(default)]
+    pub source: String,
     #[serde(default)]
     pub owner_definition: Option<OwnerDefinition>,
     #[serde(default)]
@@ -89,6 +109,11 @@ impl DataContent {
             created_at: self.created_at,
             lifetime: self.lifetime,
             owner_type,
+            workflow_name: self.workflow_name,
+            workflow_run_id: self.workflow_run_id,
+            job_name: self.job_name,
+            step_name: self.step_name,
+            source: self.source,
             tags: self.tags,
         }
     }

@@ -17,7 +17,7 @@ use super::{
 };
 use crate::error::{Error, Result};
 
-const ALL_DATA_SELECT: &str = r#"{"id": id, "name": name, "version": version, "createdAt": createdAt, "modelName": modelName, "modelId": modelId, "dataType": dataType, "contentType": contentType, "lifetime": lifetime, "ownerType": ownerType, "streaming": streaming, "size": size, "tags": tags}"#;
+const ALL_DATA_SELECT: &str = r#"{"id": id, "name": name, "version": version, "createdAt": createdAt, "modelName": modelName, "modelId": modelId, "dataType": dataType, "contentType": contentType, "lifetime": lifetime, "ownerType": ownerType, "workflowName": workflowName, "workflowRunId": workflowRunId, "jobName": jobName, "stepName": stepName, "source": source, "streaming": streaming, "size": size, "tags": tags}"#;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RunEvent {

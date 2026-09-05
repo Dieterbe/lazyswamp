@@ -1166,119 +1166,147 @@ fn has_complex_schema(value: &serde_json::Value) -> bool {
 fn render_data(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(38), Constraint::Percentage(62)])
+        .constraints([
+            Constraint::Percentage(30),
+            Constraint::Percentage(23),
+            Constraint::Percentage(47),
+        ])
         .split(area);
     let items: Vec<ListItem<'_>> = app
-        .artifacts
-        .iter()
+        .visible_artifacts()
         .map(|artifact| {
+            let origin = match artifact.owner_type.as_str() {
+                "workflow-step" => "workflow",
+                "model-method" => "direct",
+                "manual" => "manual",
+                _ => "unknown",
+            };
             ListItem::new(vec![
                 Line::from(format!("{}  v{}", artifact.name, artifact.version)),
                 Line::from(Span::styled(
                     format!(
-                        "{} · {} · {} B",
-                        artifact.data_type, artifact.content_type, artifact.size
+                        "{} · {} · {origin}",
+                        artifact.data_type, artifact.content_type
                     ),
                     Style::default().fg(Color::DarkGray),
                 )),
             ])
         })
         .collect();
+    let resource_title = format!(" Resources · {} · o origin ", app.data_origin.label());
     let list = List::new(items)
-        .block(content_block(" Data ", app))
+        .block(content_block(&resource_title, app))
         .highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White))
         .highlight_symbol("› ");
     let mut state = ListState::default().with_selected(Some(app.artifact_index));
     frame.render_stateful_widget(list, chunks[0], &mut state);
 
+    let version_items: Vec<ListItem<'_>> = if app.versions.is_empty() {
+        vec![ListItem::new(Span::styled(
+            "Loading version history…",
+            Style::default().fg(Color::DarkGray),
+        ))]
+    } else {
+        app.visible_versions()
+            .map(|version| {
+                let markers = format!(
+                    "{}{}",
+                    if version.is_latest { "latest " } else { "" },
+                    if app.compare_base == Some(version.version) {
+                        "base "
+                    } else {
+                        ""
+                    },
+                );
+                ListItem::new(vec![
+                    Line::from(format!("v{}  {markers}", version.version)),
+                    Line::from(Span::styled(
+                        format!("{} · {} B", version.created_at, version.size),
+                        Style::default().fg(Color::DarkGray),
+                    )),
+                ])
+            })
+            .collect()
+    };
+    let versions = List::new(version_items)
+        .block(
+            Block::default()
+                .title(" Versions · Space base · d compare ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(if app.focus == Focus::Versions {
+                    ACCENT
+                } else {
+                    Color::DarkGray
+                })),
+        )
+        .highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White))
+        .highlight_symbol("› ");
+    let mut version_state = ListState::default()
+        .with_selected((app.visible_versions().count() > 0).then_some(app.version_cursor));
+    frame.render_stateful_widget(versions, chunks[1], &mut version_state);
+
     let right = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(9), Constraint::Min(5)])
-        .split(chunks[1]);
+        .constraints([Constraint::Length(12), Constraint::Min(5)])
+        .split(chunks[2]);
     let metadata = app.selected_artifact().map_or_else(
         || "No data produced by this model.".to_owned(),
         |artifact| {
             let mut metadata = format!(
-                "Name: {}\nVersion: {}\nKind: {}\nContent: {}\nSize: {} B · Created: {}",
+                "Name: {} · Version: v{}\nKind: {} · Content: {} · Size: {} B\nCreated: {} · Lifetime: {} · Streaming: {}\n\nProvenance\nOwner: {}",
                 artifact.name,
                 artifact.version,
                 artifact.data_type,
                 artifact.content_type,
                 artifact.size,
-                artifact.created_at
+                artifact.created_at,
+                if artifact.lifetime.is_empty() { "unknown" } else { &artifact.lifetime },
+                artifact.streaming,
+                if artifact.owner_type.is_empty() { "unknown" } else { &artifact.owner_type },
             );
-            if let Some(content) = app
-                .content
-                .as_ref()
-                .filter(|content| content.name == artifact.name)
-            {
-                metadata.push_str(&format!(
-                    "\nLifetime: {} · Owner: {} · Streaming: {}\nTags: {}",
-                    if content.lifetime.is_empty() {
-                        "unknown"
-                    } else {
-                        &content.lifetime
-                    },
-                    if content.effective_owner_type().is_empty() {
-                        "unknown"
-                    } else {
-                        content.effective_owner_type()
-                    },
-                    content.streaming,
-                    serde_json::to_string(&content.tags).unwrap_or_default()
-                ));
+            if !artifact.workflow_name.is_empty() {
+                metadata.push_str(&format!("\nWorkflow: {}", artifact.workflow_name));
             }
+            if !artifact.workflow_run_id.is_empty() {
+                metadata.push_str(&format!(" · Run: {}", artifact.workflow_run_id));
+            }
+            if !artifact.job_name.is_empty() || !artifact.step_name.is_empty() {
+                metadata.push_str(&format!("\nJob: {} · Step: {}", artifact.job_name, artifact.step_name));
+            }
+            if !artifact.source.is_empty() {
+                metadata.push_str(&format!("\nSource: {}", artifact.source));
+            }
+            metadata.push_str(&format!("\nTags: {}", serde_json::to_string(&artifact.tags).unwrap_or_default()));
             metadata
         },
     );
     frame.render_widget(
-        Paragraph::new(metadata).block(Block::default().title(" Metadata ").borders(Borders::ALL)),
+        Paragraph::new(metadata)
+            .block(
+                Block::default()
+                    .title(" Selected resource ")
+                    .borders(Borders::ALL),
+            )
+            .wrap(Wrap { trim: false }),
         right[0],
     );
 
-    let mut body = if let Some(diff) = &app.diff {
+    let body = if let Some(diff) = &app.diff {
         diff.clone()
     } else {
         app.content_text().unwrap_or_else(|| {
             if app.content.is_some() {
                 "Binary content is not previewed.".to_owned()
             } else {
-                "Enter loads content and version history.".to_owned()
+                "Enter loads the selected version. Choose a version with [ / ].".to_owned()
             }
         })
     };
-    if !app.versions.is_empty() {
-        let versions = app
-            .versions
-            .iter()
-            .enumerate()
-            .map(|(index, version)| {
-                let cursor = if index == app.version_cursor {
-                    "›"
-                } else {
-                    " "
-                };
-                let a = if app.compare_a == Some(index) {
-                    "A"
-                } else {
-                    " "
-                };
-                let b = if app.compare_b == Some(index) {
-                    "B"
-                } else {
-                    " "
-                };
-                format!("{cursor}{a}{b} v{}", version.version)
-            })
-            .collect::<Vec<_>>()
-            .join("  ");
-        body = format!("Versions: {versions}\n[ ] select · a/b compare · Enter load\n\n{body}");
-    }
     frame.render_widget(
         Paragraph::new(body)
             .block(
                 Block::default()
-                    .title(" Content / diff ")
+                    .title(" Content / diff · Enter loads selected version ")
                     .borders(Borders::ALL),
             )
             .wrap(Wrap { trim: false }),
@@ -1289,7 +1317,7 @@ fn render_data(frame: &mut Frame<'_>, app: &App, area: Rect) {
 fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let mut lines = vec![Line::from(vec![
         Span::styled(app.status.as_str(), Style::default().fg(ACCENT)),
-        Span::raw("  ·  / filter definitions · Tab focus · r refresh · ? help · q quit"),
+        Span::raw("  ·  / filter focused list · Tab focus · r refresh · ? help · q quit"),
     ])];
     if let Some(error) = &app.error {
         lines.push(Line::from(Span::styled(
@@ -1303,16 +1331,17 @@ fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
 fn render_modal(frame: &mut Frame<'_>, app: &App) {
     match &app.mode {
         InputMode::Normal => {}
-        InputMode::Search => render_popup(
+        InputMode::Search(target) => render_popup(
             frame,
             60,
             5,
-            if app.tab == Tab::Workflows {
-                " Filter workflows "
-            } else {
-                " Filter definitions "
+            match target {
+                crate::app::SearchTarget::Definitions => " Filter definitions ",
+                crate::app::SearchTarget::Workflows => " Filter workflows ",
+                crate::app::SearchTarget::Resources => " Filter resources ",
+                crate::app::SearchTarget::Versions => " Filter versions ",
             },
-            format!("{}█\nEnter applies · Esc clears", app.search),
+            format!("{}█\nEnter applies · Esc clears", app.search_text(*target)),
         ),
         InputMode::MethodForm => render_form_popup(frame, app),
         InputMode::Review => {
@@ -1369,7 +1398,7 @@ fn render_modal(frame: &mut Frame<'_>, app: &App) {
             70,
             70,
             " Help ",
-            "Arrows or j/k  Move selection\nTab              Cycle definition/type method/output focus\n1/2/3            Models/Data/Workflows\nEnter            Open, load, or run\n/                Filter definitions\nr                Refresh\n[ / ]            Data versions or type outputs\nSpace            Expand/collapse selected output\na / b            Mark comparison versions\nc                Cancel active run\nEsc              Close dialog or hide run log\nq                Quit\n?                Close help",
+            "Arrows or j/k  Move selection\nTab              Cycle focused panes\n1/2/3            Models/Data/Workflows\nEnter            Open, load, or run\n/                Filter focused list\nr                Refresh\no                Cycle Data origin filter\n[ / ]            Data versions or type outputs\nSpace            Toggle output or mark comparison base\nd                Compare base version with selected version\nc                Cancel active run\nEsc              Close dialog or hide run log\nq                Quit\n?                Close help",
         ),
     }
 }

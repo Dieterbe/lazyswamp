@@ -30,6 +30,11 @@ type StartupOutcome = (
     crate::error::Result<Vec<WorkflowSummary>>,
 );
 type StartupTask = JoinHandle<StartupOutcome>;
+type VersionTask = (
+    String,
+    String,
+    JoinHandle<crate::error::Result<Vec<DataVersion>>>,
+);
 
 enum PreloadEvent {
     Type(String, crate::error::Result<TypeDescription>),
@@ -52,7 +57,64 @@ pub enum Tab {
 pub enum Focus {
     Models,
     Content,
+    Versions,
     Outputs,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum SearchTarget {
+    Definitions,
+    Workflows,
+    Resources,
+    Versions,
+}
+
+impl SearchTarget {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Definitions => "definitions",
+            Self::Workflows => "workflows",
+            Self::Resources => "resources",
+            Self::Versions => "versions",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DataOrigin {
+    All,
+    Direct,
+    Workflow,
+    Manual,
+}
+
+impl DataOrigin {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::All => "All origins",
+            Self::Direct => "Direct runs",
+            Self::Workflow => "Workflow steps",
+            Self::Manual => "Manual",
+        }
+    }
+
+    fn next(self) -> Self {
+        match self {
+            Self::All => Self::Direct,
+            Self::Direct => Self::Workflow,
+            Self::Workflow => Self::Manual,
+            Self::Manual => Self::All,
+        }
+    }
+
+    fn matches(self, artifact: &DataArtifact) -> bool {
+        match self {
+            Self::All => true,
+            Self::Direct => artifact.owner_type == "model-method",
+            Self::Workflow => artifact.owner_type == "workflow-step",
+            Self::Manual => artifact.owner_type == "manual",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -65,7 +127,7 @@ pub enum LargeAction {
 #[derive(Debug, Clone)]
 pub enum InputMode {
     Normal,
-    Search,
+    Search(SearchTarget),
     MethodForm,
     Review,
     DestructiveConfirm(String),
@@ -99,16 +161,18 @@ pub struct App {
     pub expanded_output: Option<usize>,
     pub artifacts: Vec<DataArtifact>,
     pub artifact_index: usize,
+    pub data_origin: DataOrigin,
     pub content: Option<DataContent>,
     pub versions: Vec<DataVersion>,
     pub version_cursor: usize,
-    pub compare_a: Option<usize>,
-    pub compare_b: Option<usize>,
+    pub compare_base: Option<u64>,
     pub diff: Option<String>,
     pub tab: Tab,
     pub focus: Focus,
     pub mode: InputMode,
     pub search: String,
+    pub resource_search: String,
+    pub version_search: String,
     pub form: Option<MethodForm>,
     pub pending_payload: Option<Value>,
     pub status: String,
@@ -129,6 +193,7 @@ pub struct App {
     model_task: Option<(String, JoinHandle<crate::error::Result<ModelDetails>>)>,
     type_task: Option<(String, JoinHandle<crate::error::Result<TypeDescription>>)>,
     data_task: Option<(String, JoinHandle<crate::error::Result<Vec<DataArtifact>>>)>,
+    version_task: Option<VersionTask>,
     workflow_task: Option<(String, JoinHandle<crate::error::Result<WorkflowDefinition>>)>,
     preload_task: Option<JoinHandle<()>>,
     preload_receiver: Option<mpsc::UnboundedReceiver<PreloadEvent>>,
@@ -159,16 +224,18 @@ impl App {
             expanded_output: None,
             artifacts: Vec::new(),
             artifact_index: 0,
+            data_origin: DataOrigin::All,
             content: None,
             versions: Vec::new(),
             version_cursor: 0,
-            compare_a: None,
-            compare_b: None,
+            compare_base: None,
             diff: None,
             tab: Tab::Overview,
             focus: Focus::Models,
             mode: InputMode::Normal,
             search: String::new(),
+            resource_search: String::new(),
+            version_search: String::new(),
             form: None,
             pending_payload: None,
             status: "Starting…".to_owned(),
@@ -189,6 +256,7 @@ impl App {
             model_task: None,
             type_task: None,
             data_task: None,
+            version_task: None,
             workflow_task: None,
             preload_task: None,
             preload_receiver: None,
@@ -210,6 +278,9 @@ impl App {
             task.abort();
         }
         if let Some((_, task)) = self.data_task.take() {
+            task.abort();
+        }
+        if let Some((_, _, task)) = self.version_task.take() {
             task.abort();
         }
         if let Some((_, task)) = self.workflow_task.take() {
@@ -312,8 +383,39 @@ impl App {
             })
     }
 
+    pub fn visible_artifacts(&self) -> impl Iterator<Item = &DataArtifact> {
+        let needle = self.resource_search.to_ascii_lowercase();
+        self.artifacts.iter().filter(move |artifact| {
+            self.data_origin.matches(artifact)
+                && (needle.is_empty()
+                    || artifact.name.to_ascii_lowercase().contains(&needle)
+                    || artifact.data_type.to_ascii_lowercase().contains(&needle)
+                    || artifact.content_type.to_ascii_lowercase().contains(&needle)
+                    || artifact
+                        .workflow_name
+                        .to_ascii_lowercase()
+                        .contains(&needle)
+                    || artifact.job_name.to_ascii_lowercase().contains(&needle)
+                    || artifact.step_name.to_ascii_lowercase().contains(&needle))
+        })
+    }
+
     pub fn selected_artifact(&self) -> Option<&DataArtifact> {
-        self.artifacts.get(self.artifact_index)
+        self.visible_artifacts().nth(self.artifact_index)
+    }
+
+    pub fn visible_versions(&self) -> impl Iterator<Item = &DataVersion> {
+        let needle = self.version_search.to_ascii_lowercase();
+        self.versions.iter().filter(move |version| {
+            needle.is_empty()
+                || version.version.to_string().contains(&needle)
+                || version.created_at.to_ascii_lowercase().contains(&needle)
+                || version.size.to_string().contains(&needle)
+        })
+    }
+
+    pub fn selected_version(&self) -> Option<&DataVersion> {
+        self.visible_versions().nth(self.version_cursor)
     }
 
     pub fn run_log_matches_selection(&self) -> bool {
@@ -326,7 +428,7 @@ impl App {
         self.error = None;
         match self.mode.clone() {
             InputMode::Normal => self.handle_normal(key).await,
-            InputMode::Search => self.handle_search(key).await,
+            InputMode::Search(target) => self.handle_search(key, target).await,
             InputMode::MethodForm => self.handle_form(key).await,
             InputMode::Review => self.handle_review(key).await,
             InputMode::DestructiveConfirm(text) => {
@@ -393,10 +495,7 @@ impl App {
                 self.run_log_visible = false
             }
             KeyCode::Char('?') => self.mode = InputMode::Help,
-            KeyCode::Char('/') if self.focus == Focus::Models => {
-                self.search.clear();
-                self.mode = InputMode::Search;
-            }
+            KeyCode::Char('/') => self.open_search(),
             KeyCode::Char('1') => self.activate_tab(Tab::Overview),
             KeyCode::Char('2') => self.activate_tab(Tab::Data),
             KeyCode::Char('3') => self.activate_tab(Tab::Workflows),
@@ -404,7 +503,9 @@ impl App {
                 self.focus = match self.focus {
                     Focus::Models => Focus::Content,
                     Focus::Content if self.tab == Tab::Overview => Focus::Outputs,
+                    Focus::Content if self.tab == Tab::Data => Focus::Versions,
                     Focus::Content => Focus::Models,
+                    Focus::Versions => Focus::Models,
                     Focus::Outputs => Focus::Models,
                 }
             }
@@ -423,6 +524,13 @@ impl App {
             KeyCode::Down | KeyCode::Char('j') => self.move_selection(1).await,
             KeyCode::Enter => self.open_selected().await,
             KeyCode::Char('c') if self.run_receiver.is_some() => self.cancel_run().await,
+            KeyCode::Char('o') if self.tab == Tab::Data => self.cycle_data_origin(),
+            KeyCode::Char(' ') if self.tab == Tab::Data && self.focus == Focus::Versions => {
+                self.toggle_comparison_base()
+            }
+            KeyCode::Char('d') if self.tab == Tab::Data && self.focus == Focus::Versions => {
+                self.compare_selected_version().await
+            }
             KeyCode::Char(' ') if self.tab == Tab::Overview && self.focus == Focus::Outputs => {
                 self.toggle_output()
             }
@@ -434,33 +542,69 @@ impl App {
             }
             KeyCode::Char('[') if self.tab == Tab::Data => self.move_version(-1),
             KeyCode::Char(']') if self.tab == Tab::Data => self.move_version(1),
-            KeyCode::Char('a') if self.tab == Tab::Data => {
-                self.compare_a = self
-                    .versions
-                    .get(self.version_cursor)
-                    .map(|_| self.version_cursor)
+            _ => {}
+        }
+    }
+
+    async fn handle_search(&mut self, key: KeyEvent, target: SearchTarget) {
+        match key.code {
+            KeyCode::Esc => {
+                self.clear_search(target);
+                self.mode = InputMode::Normal;
             }
-            KeyCode::Char('b') if self.tab == Tab::Data => {
-                self.compare_b = self
-                    .versions
-                    .get(self.version_cursor)
-                    .map(|_| self.version_cursor);
-                self.compare_versions().await;
+            KeyCode::Enter => {
+                self.mode = InputMode::Normal;
+                self.apply_search_selection(target);
+            }
+            KeyCode::Backspace => {
+                self.search_text_mut(target).pop();
+                self.apply_search_selection(target);
+            }
+            KeyCode::Char(character) => {
+                self.search_text_mut(target).push(character);
+                self.apply_search_selection(target);
             }
             _ => {}
         }
     }
 
-    async fn handle_search(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Esc => {
-                self.search.clear();
+    fn open_search(&mut self) {
+        let target = match (self.tab, self.focus) {
+            (Tab::Workflows, Focus::Models) => SearchTarget::Workflows,
+            (Tab::Data, Focus::Content) => SearchTarget::Resources,
+            (Tab::Data, Focus::Versions) => SearchTarget::Versions,
+            _ => SearchTarget::Definitions,
+        };
+        self.search_text_mut(target).clear();
+        self.mode = InputMode::Search(target);
+    }
+
+    pub fn search_text(&self, target: SearchTarget) -> &str {
+        match target {
+            SearchTarget::Definitions | SearchTarget::Workflows => &self.search,
+            SearchTarget::Resources => &self.resource_search,
+            SearchTarget::Versions => &self.version_search,
+        }
+    }
+
+    fn search_text_mut(&mut self, target: SearchTarget) -> &mut String {
+        match target {
+            SearchTarget::Definitions | SearchTarget::Workflows => &mut self.search,
+            SearchTarget::Resources => &mut self.resource_search,
+            SearchTarget::Versions => &mut self.version_search,
+        }
+    }
+
+    fn clear_search(&mut self, target: SearchTarget) {
+        self.search_text_mut(target).clear();
+        self.apply_search_selection(target);
+    }
+
+    fn apply_search_selection(&mut self, target: SearchTarget) {
+        match target {
+            SearchTarget::Definitions | SearchTarget::Workflows => {
                 self.apply_filter();
-                self.mode = InputMode::Normal;
-            }
-            KeyCode::Enter => {
-                self.mode = InputMode::Normal;
-                if self.tab == Tab::Workflows {
+                if matches!(target, SearchTarget::Workflows) {
                     self.workflow_index = 0;
                     self.workflow_selection_changed();
                 } else {
@@ -468,15 +612,15 @@ impl App {
                     self.selection_changed();
                 }
             }
-            KeyCode::Backspace => {
-                self.search.pop();
-                self.apply_filter();
+            SearchTarget::Resources => {
+                self.artifact_index = 0;
+                self.clear_data_view();
+                self.schedule_versions(false);
             }
-            KeyCode::Char(character) => {
-                self.search.push(character);
-                self.apply_filter();
+            SearchTarget::Versions => {
+                self.version_cursor = 0;
+                self.diff = None;
             }
-            _ => {}
         }
     }
 
@@ -594,20 +738,30 @@ impl App {
         if tab != Tab::Overview && self.focus == Focus::Outputs {
             self.focus = Focus::Content;
         }
+        if tab != Tab::Data && self.focus == Focus::Versions {
+            self.focus = Focus::Content;
+        }
         match tab {
             Tab::Overview => {
                 abort_named_task(&mut self.data_task);
+                if let Some((_, _, task)) = self.version_task.take() {
+                    task.abort();
+                }
                 self.schedule_model(false);
                 self.schedule_type(false);
             }
             Tab::Data => {
                 abort_named_task(&mut self.type_task);
                 self.schedule_data(false);
+                self.schedule_versions(false);
             }
             Tab::Workflows => {
                 abort_named_task(&mut self.model_task);
                 abort_named_task(&mut self.type_task);
                 abort_named_task(&mut self.data_task);
+                if let Some((_, _, task)) = self.version_task.take() {
+                    task.abort();
+                }
                 self.schedule_workflow(false);
             }
         }
@@ -643,6 +797,7 @@ impl App {
             Tab::Data => {
                 abort_named_task(&mut self.type_task);
                 self.schedule_data(false);
+                self.schedule_versions(false);
             }
             Tab::Workflows => {}
         }
@@ -835,6 +990,45 @@ impl App {
         ));
     }
 
+    fn schedule_versions(&mut self, force: bool) {
+        if self.tab != Tab::Data {
+            return;
+        }
+        let Some(model) = self.selected_model().map(|model| model.name.clone()) else {
+            return;
+        };
+        let Some(name) = self
+            .selected_artifact()
+            .map(|artifact| artifact.name.clone())
+        else {
+            return;
+        };
+        if !force
+            && self
+                .version_task
+                .as_ref()
+                .is_some_and(|(task_model, task_name, _)| {
+                    task_model == &model && task_name == &name
+                })
+        {
+            return;
+        }
+        if let Some((_, _, task)) = self.version_task.take() {
+            task.abort();
+        }
+        let client = Arc::clone(&self.client);
+        let task_model = model.clone();
+        let task_name = name.clone();
+        self.version_task = Some((
+            model,
+            name,
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(if force { 0 } else { 100 })).await;
+                client.data_versions(&task_model, &task_name).await
+            }),
+        ));
+    }
+
     fn schedule_workflow(&mut self, force: bool) {
         let Some(workflow) = self.selected_workflow().cloned() else {
             return;
@@ -996,8 +1190,9 @@ impl App {
                         self.artifacts = artifacts;
                         self.artifact_index = self
                             .artifact_index
-                            .min(self.artifacts.len().saturating_sub(1));
+                            .min(self.visible_artifacts().count().saturating_sub(1));
                         self.status = format!("Loaded data for {name}");
+                        self.schedule_versions(false);
                     }
                 }
                 Ok(Err(error)) => {
@@ -1010,6 +1205,34 @@ impl App {
                 }
                 Err(error) if !error.is_cancelled() => {
                     self.fail(format!("Data loading task failed: {error}"));
+                }
+                Err(_) => {}
+            }
+        }
+
+        if self
+            .version_task
+            .as_ref()
+            .is_some_and(|(_, _, task)| task.is_finished())
+        {
+            let (model, name, task) = self.version_task.take().expect("checked above");
+            let still_selected = self
+                .selected_model()
+                .is_some_and(|selected| selected.name == model)
+                && self
+                    .selected_artifact()
+                    .is_some_and(|artifact| artifact.name == name);
+            match task.await {
+                Ok(Ok(versions)) if still_selected => {
+                    self.versions = versions;
+                    self.version_cursor = 0;
+                    self.compare_base = None;
+                }
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) if still_selected => self.error = Some(error.to_string()),
+                Ok(Err(_)) => {}
+                Err(error) if !error.is_cancelled() => {
+                    self.error = Some(format!("Version loading task failed: {error}"));
                 }
                 Err(_) => {}
             }
@@ -1221,9 +1444,17 @@ impl App {
                 }
             }
             Tab::Data => {
-                self.artifact_index =
-                    move_index(self.artifact_index, self.artifacts.len(), direction);
-                self.clear_data_view();
+                if self.focus == Focus::Versions {
+                    self.move_version(direction);
+                } else {
+                    self.artifact_index = move_index(
+                        self.artifact_index,
+                        self.visible_artifacts().count(),
+                        direction,
+                    );
+                    self.clear_data_view();
+                    self.schedule_versions(false);
+                }
             }
             Tab::Workflows => {
                 self.workflow_node_index = move_index(
@@ -1242,6 +1473,14 @@ impl App {
             .map(|description| description.data_output_specs.len())
             .unwrap_or(0);
         self.output_index = move_index(self.output_index, length, direction);
+    }
+
+    fn cycle_data_origin(&mut self) {
+        self.data_origin = self.data_origin.next();
+        self.artifact_index = 0;
+        self.clear_data_view();
+        self.schedule_versions(false);
+        self.status = format!("Data origin: {}", self.data_origin.label());
     }
 
     fn toggle_output(&mut self) {
@@ -1280,7 +1519,7 @@ impl App {
                 }
             }
             Tab::Data => {
-                if self.content.is_some() && !self.versions.is_empty() {
+                if self.focus == Focus::Versions && !self.versions.is_empty() {
                     self.load_cursor_version().await;
                 } else {
                     self.request_latest().await;
@@ -1411,11 +1650,15 @@ impl App {
     }
 
     fn move_version(&mut self, direction: isize) {
-        self.version_cursor = move_index(self.version_cursor, self.versions.len(), direction);
+        self.version_cursor = move_index(
+            self.version_cursor,
+            self.visible_versions().count(),
+            direction,
+        );
     }
 
     async fn load_cursor_version(&mut self) {
-        let Some(version) = self.versions.get(self.version_cursor) else {
+        let Some(version) = self.selected_version() else {
             return;
         };
         if version.size > self.config.preview_limit {
@@ -1442,17 +1685,32 @@ impl App {
         }
     }
 
-    async fn compare_versions(&mut self) {
-        let (Some(a_index), Some(b_index)) = (self.compare_a, self.compare_b) else {
+    fn toggle_comparison_base(&mut self) {
+        let Some(version) = self.selected_version().map(|version| version.version) else {
             return;
         };
-        let (Some(a), Some(b)) = (self.versions.get(a_index), self.versions.get(b_index)) else {
+        self.compare_base = (self.compare_base != Some(version)).then_some(version);
+    }
+
+    async fn compare_selected_version(&mut self) {
+        let Some(base) = self.compare_base else {
+            self.status = "Mark a base version with Space first".to_owned();
             return;
         };
-        if a.size > self.config.preview_limit || b.size > self.config.preview_limit {
-            self.mode = InputMode::LargeConfirm(LargeAction::Diff(a.version, b.version));
+        let Some(selected) = self.selected_version() else {
+            return;
+        };
+        if base == selected.version {
+            self.status = "Choose a different version to compare".to_owned();
+            return;
+        }
+        let Some(base_info) = self.versions.iter().find(|version| version.version == base) else {
+            return;
+        };
+        if base_info.size > self.config.preview_limit || selected.size > self.config.preview_limit {
+            self.mode = InputMode::LargeConfirm(LargeAction::Diff(base, selected.version));
         } else {
-            self.load_diff(a.version, b.version).await;
+            self.load_diff(base, selected.version).await;
         }
     }
 
@@ -1537,8 +1795,7 @@ impl App {
         self.content = None;
         self.versions.clear();
         self.version_cursor = 0;
-        self.compare_a = None;
-        self.compare_b = None;
+        self.compare_base = None;
         self.diff = None;
     }
 
@@ -1611,6 +1868,21 @@ mod tests {
         assert_eq!(move_index(2, 0, -1), 0);
     }
 
+    #[test]
+    fn data_origin_filters_artifacts_by_owner_type() {
+        let mut workflow = artifact();
+        workflow.owner_type = "workflow-step".to_owned();
+        let mut manual = artifact();
+        manual.owner_type = "manual".to_owned();
+
+        assert!(DataOrigin::Direct.matches(&artifact()));
+        assert!(DataOrigin::Workflow.matches(&workflow));
+        assert!(DataOrigin::Manual.matches(&manual));
+        assert!(!DataOrigin::Workflow.matches(&artifact()));
+        assert_eq!(DataOrigin::All.next(), DataOrigin::Direct);
+        assert_eq!(DataOrigin::Workflow.label(), "Workflow steps");
+    }
+
     #[tokio::test]
     async fn model_method_and_data_flow() {
         let calls = Arc::new(Mutex::new(Vec::new()));
@@ -1681,14 +1953,15 @@ mod tests {
         assert_eq!(app.expanded_output, None);
 
         app.tab = Tab::Data;
+        app.focus = Focus::Versions;
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .await;
         assert_eq!(app.versions.len(), 2);
-        app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE))
+        app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
             .await;
         app.handle_key(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::NONE))
             .await;
-        app.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE))
+        app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE))
             .await;
         assert!(
             app.diff
@@ -1921,6 +2194,11 @@ mod tests {
             created_at: "now".to_owned(),
             lifetime: "infinite".to_owned(),
             owner_type: "model-method".to_owned(),
+            workflow_name: String::new(),
+            workflow_run_id: String::new(),
+            job_name: String::new(),
+            step_name: String::new(),
+            source: "model-method".to_owned(),
             tags: Default::default(),
         }
     }
@@ -1940,6 +2218,11 @@ mod tests {
             streaming: false,
             tags: Default::default(),
             owner_type: "model-method".to_owned(),
+            workflow_name: String::new(),
+            workflow_run_id: String::new(),
+            job_name: String::new(),
+            step_name: String::new(),
+            source: "model-method".to_owned(),
             owner_definition: None,
             content: json!({"value": version}),
         }
